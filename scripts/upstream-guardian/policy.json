@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "officialRepository": "block/buzz",
+  "officialBranch": "main",
+  "integrationBranch": "codex/hermes-mcp-bridge",
+  "safePaths": ["docs/**", "**/*.md", ".github/ISSUE_TEMPLATE/**"],
+  "criticalPaths": [
+    "desktop/src-tauri/build.rs",
+    "desktop/src-tauri/tauri.conf.json",
+    "desktop/src-tauri/src/lib.rs",
+    "desktop/src-tauri/src/managed_agents/**",
+    "desktop/src/features/agents/**",
+    "crates/buzz-acp/**",
+    "crates/buzz-agent/**",
+    "crates/buzz-dev-mcp/**",
+    "crates/buzz-persona/**",
+    "crates/buzz-workflow/**"
+  ],
+  "riskChecks": {
+    "green": [
+      "node --test scripts/upstream-guardian/*.test.mjs",
+      "git diff --check"
+    ],
+    "orange": ["just ci", "just desktop-release-build"],
+    "red": [
+      "just ci",
+      "just desktop-release-build",
+      "just desktop-signing-status"
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "upstream-guardian-control-plane",
+      "description": "Upstream compatibility policy, deterministic reports, candidate preparation, and CI routing.",
+      "paths": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/upstream-guardian.yml",
+        ".gitignore",
+        "Justfile",
+        "docs/upstream-guardian.md",
+        "scripts/upstream-guardian/**"
+      ],
+      "owner": "Genie",
+      "reviewer": "Hades",
+      "verifier": "Lumière",
+      "checks": ["just guardian-test", "git diff --check"]
+    },
+    {
+      "id": "hermes-agent-runtime",
+      "description": "Hermes ACP launch, trusted Buzz MCP injection, agent restore, and runtime isolation.",
+      "paths": [
+        "desktop/src-tauri/src/managed_agents/**",
+        "crates/buzz-acp/**",
+        "crates/buzz-agent/**",
+        "crates/buzz-dev-mcp/**"
+      ],
+      "owner": "Hercules",
+      "reviewer": "Hades",
+      "verifier": "Lumière",
+      "checks": [
+        "cargo test --manifest-path desktop/src-tauri/Cargo.toml managed_agents",
+        "cargo test -p buzz-acp"
+      ]
+    },
+    {
+      "id": "agent-personas-and-parallelism",
+      "description": "Persona creation, team instructions, model/runtime selection, and one-worker defaults.",
+      "paths": [
+        "desktop/src/features/agents/**",
+        "desktop/src-tauri/src/commands/personas/**",
+        "desktop/src-tauri/src/commands/agents.rs",
+        "crates/buzz-persona/**"
+      ],
+      "owner": "Hercules",
+      "reviewer": "Hades",
+      "verifier": "Lumière",
+      "checks": ["pnpm --dir desktop test", "pnpm --dir desktop typecheck"]
+    },
+    {
+      "id": "crm-message-actions",
+      "description": "CRM action cards, draft controls, reactions, and calendar actions rendered in messages.",
+      "paths": [
+        "desktop/src/features/messages/**",
+        "desktop/src/shared/ui/markdown.tsx"
+      ],
+      "owner": "Hercules",
+      "reviewer": "Hades",
+      "verifier": "Lumière",
+      "checks": ["pnpm --dir desktop test", "pnpm --dir desktop test:e2e:smoke"]
+    },
+    {
+      "id": "community-taxonomy",
+      "description": "Configured CRM channel taxonomy and onboarding behavior.",
+      "paths": [
+        "crates/buzz-cli/src/commands/channels.rs",
+        "desktop/src-tauri/src/commands/channels*",
+        "desktop/src/features/onboarding/**",
+        "desktop/src/features/channels/**"
+      ],
+      "owner": "Hercules",
+      "reviewer": "Hades",
+      "verifier": "Lumière",
+      "checks": [
+        "cargo test -p buzz-cli",
+        "cargo test --manifest-path desktop/src-tauri/Cargo.toml channels",
+        "pnpm --dir desktop test"
+      ]
+    },
+    {
+      "id": "local-macos-delivery",
+      "description": "Local macOS build, stable signing identity, Keychain continuity, and installed-app delivery.",
+      "paths": [
+        ".gitignore",
+        "Justfile",
+        "crates/buzz-cli/src/client.rs",
+        "desktop/README.md",
+        "desktop/scripts/install-local-macos-app.sh",
+        "desktop/src-tauri/build.rs",
+        "desktop/src-tauri/tauri.conf.json",
+        "docs/desktop-local-macos-signing.md"
+      ],
+      "owner": "Mushu",
+      "reviewer": "Hades",
+      "verifier": "Lumière",
+      "checks": [
+        "bash -n desktop/scripts/install-local-macos-app.sh",
+        "shellcheck desktop/scripts/install-local-macos-app.sh",
+        "just desktop-release-build",
+        "just desktop-signing-status"
+      ]
+    }
+  ]
+}

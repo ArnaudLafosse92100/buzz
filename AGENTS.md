@@ -115,6 +115,20 @@ Additional rules:
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
 - New public API must have doc comments
 
+### Customized fork upstream policy
+
+This fork protects local capabilities with
+`scripts/upstream-guardian/policy.json`. When a commit adds or materially
+changes a local customization, update the corresponding capability paths,
+owners, and checks in that policy in the same commit.
+
+Before integrating `block/buzz/main`, run `just guardian-analyze`. Do not bypass
+an orange or red result with a direct merge merely because Git reports no text
+conflict. Green may prepare an isolated candidate; orange requires specialist
+adaptation and independent review; red requires a human decision. Review and
+live-verification evidence must reference the same immutable candidate SHA.
+See `docs/upstream-guardian.md`.
+
 ---
 
 ## Key Patterns

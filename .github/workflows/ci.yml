@@ -84,6 +84,8 @@ jobs:
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
+      - name: Upstream Guardian policy tests
+        run: node --test scripts/upstream-guardian/*.test.mjs
 
   rust-lint:
     name: Rust Lint

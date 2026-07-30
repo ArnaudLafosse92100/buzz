@@ -81,6 +81,22 @@ ps:
 logs *ARGS:
     docker compose logs -f {{ARGS}}
 
+# Analyze official Buzz changes against the customized branch
+guardian-analyze upstream="origin/main":
+    node scripts/upstream-guardian/cli.mjs analyze --upstream "{{upstream}}" --output-dir .guardian-runs/latest
+
+# Prepare an isolated candidate only when the Guardian classifies it green
+guardian-prepare upstream="origin/main":
+    node scripts/upstream-guardian/cli.mjs prepare --upstream "{{upstream}}" --output-dir .guardian-runs/latest
+
+# Publish the latest Guardian report to Buzz and explicitly wake Genie
+guardian-notify:
+    node scripts/upstream-guardian/cli.mjs notify --report .guardian-runs/latest/report.md
+
+# Run the deterministic Guardian policy and git-integration tests
+guardian-test:
+    node --test scripts/upstream-guardian/*.test.mjs
+
 # ─── Build & Check ───────────────────────────────────────────────────────────
 
 # Build the Rust workspace
