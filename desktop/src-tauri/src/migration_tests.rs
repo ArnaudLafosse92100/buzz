@@ -659,6 +659,27 @@ fn reconcile_mcp_commands_sets_canonical_for_buzz_agent() {
 }
 
 #[test]
+fn reconcile_mcp_commands_sets_canonical_for_hermes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+    std::fs::write(
+        dir.path().join("agents/managed-agents.json"),
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "name": "Hermes",
+            "agent_command": "hermes-acp",
+            "mcp_command": ""
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
+}
+
+#[test]
 fn reconcile_mcp_commands_leaves_custom_value_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let json = serde_json::json!([{
