@@ -114,6 +114,13 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Displayed create defaults must be persisted defaults.** The create dialog
+   seeds `behavior.parallelism = 1`; this is a real submitted value, not a
+   placeholder. An unset behavior field may inherit the Rust runtime default,
+   but the UI must label that state as inherited instead of displaying a
+   concrete number it will not submit. The definition-to-instance mapper also
+   carries an authored parallelism explicitly so adjacent definition creation
+   and instance minting cannot diverge.
 
 ## The tests that enforce this
 

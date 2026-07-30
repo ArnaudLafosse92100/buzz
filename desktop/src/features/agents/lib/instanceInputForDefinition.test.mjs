@@ -138,7 +138,10 @@ test("row 3: failed persona avatar upload never substitutes the runtime avatar",
 });
 
 test("mapping carries the runtime and definition fields", async () => {
-  const input = await buildInstanceInputForDefinition(persona(), gooseRuntime);
+  const input = await buildInstanceInputForDefinition(
+    persona({ parallelism: 1 }),
+    gooseRuntime,
+  );
   assert.equal(input.name, "Test Agent");
   assert.equal(input.acpCommand, "buzz-acp");
   assert.equal(input.agentCommand, "goose-cmd");
@@ -152,6 +155,7 @@ test("mapping carries the runtime and definition fields", async () => {
   assert.equal(input.systemPrompt, "prompt");
   assert.equal(input.model, undefined);
   assert.equal(input.provider, undefined);
+  assert.equal(input.parallelism, 1);
   assert.equal(input.spawnAfterCreate, true);
   assert.equal(input.startOnAppLaunch, true);
   assert.deepEqual(input.backend, { type: "local" });
@@ -168,6 +172,7 @@ test("no backend intent is byte-identical to the pre-intent mapping", async () =
     personaId: "p-1",
     systemPrompt: "prompt",
     avatarUrl: "https://example.com/a.png",
+    parallelism: undefined,
     acpCommand: "buzz-acp",
     agentCommand: "goose-cmd",
     agentArgs: [],

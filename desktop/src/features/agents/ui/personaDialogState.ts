@@ -48,6 +48,10 @@ export function createPersonaDialogState(): PersonaDialogState {
       systemPrompt: "",
       runtime: undefined,
       model: undefined,
+      // A visible default must be a persisted default. Previously the form
+      // rendered a grey "1" placeholder while submitting no value, so the
+      // managed-agent backend silently minted 10 workers instead.
+      behavior: { parallelism: 1 },
     },
   };
 }

@@ -55,7 +55,7 @@ test("persona name pool helpers parse, format, and clear values", () => {
   assert.equal(formatPersonaNamePoolText(undefined), "");
 });
 
-test("createPersonaDialogState returns a fresh empty draft", () => {
+test("createPersonaDialogState persists the visible one-worker default", () => {
   const first = createPersonaDialogState();
   const second = createPersonaDialogState();
 
@@ -66,6 +66,7 @@ test("createPersonaDialogState returns a fresh empty draft", () => {
     systemPrompt: "",
     runtime: undefined,
     model: undefined,
+    behavior: { parallelism: 1 },
   });
   assert.notStrictEqual(first.initialValues, second.initialValues);
 });

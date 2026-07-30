@@ -51,13 +51,14 @@ test("chat creation cannot choose runtime, provider, model, or access", () => {
   }
 });
 
-test("chat creation leaves advanced behavior unset so the form stays collapsed", () => {
+test("chat creation persists the one-worker default", () => {
   const parsed = parseAgentManagementRequest(createPayload());
   assert.ok(parsed && parsed.action === "create");
 
   assert.deepEqual(createInputFromRequest(parsed), {
     displayName: "Research helper",
     systemPrompt: "Find reliable sources and summarize them.",
+    behavior: { parallelism: 1 },
   });
 });
 

@@ -123,6 +123,11 @@ export async function buildInstanceInputForDefinition(
     personaId: persona.id,
     systemPrompt: persona.systemPrompt,
     avatarUrl,
+    // Carry the authored definition value explicitly. The backend can inherit
+    // it from the linked definition, but the direct field keeps create
+    // deterministic even when definition persistence and instance minting are
+    // adjacent operations.
+    parallelism: persona.parallelism ?? undefined,
   };
 
   if (backendIntent?.type === "provider") {

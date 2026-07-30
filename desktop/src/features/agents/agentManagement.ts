@@ -146,5 +146,6 @@ export function createInputFromRequest(
   return {
     displayName: request.request.displayName,
     systemPrompt: request.request.systemPrompt,
+    behavior: { parallelism: 1 },
   };
 }

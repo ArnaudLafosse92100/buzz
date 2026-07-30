@@ -96,13 +96,14 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder="1"
+              placeholder="Use system default"
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
             How many conversations each running instance handles at once (1–32).
+            Leaving this blank uses the system default.
           </p>
         </div>
       </div>
