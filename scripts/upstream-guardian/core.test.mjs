@@ -140,6 +140,7 @@ test("repository inspection detects a safe pending upstream commit", (t) => {
   commitFile(repo, "README.md", "base\n", "base");
   git(repo, "branch", "custom");
   commitFile(repo, "docs/new.md", "official\n", "official docs");
+  commitFile(repo, "docs/second.md", "official two\n", "second official docs");
   const upstreamSha = git(repo, "rev-parse", "HEAD");
   git(repo, "switch", "custom");
   commitFile(
@@ -155,8 +156,12 @@ test("repository inspection detects a safe pending upstream commit", (t) => {
     policy,
   });
   assert.equal(report.risk, "green");
-  assert.equal(report.pendingCommits.length, 1);
-  assert.deepEqual(report.upstreamFiles, ["docs/new.md"]);
+  assert.equal(report.pendingCommits.length, 2);
+  assert.equal(
+    report.pendingCommits.every(({ sha }) => /^\S+$/.test(sha)),
+    true,
+  );
+  assert.deepEqual(report.upstreamFiles, ["docs/new.md", "docs/second.md"]);
   assert.equal(report.mergeProbe.conflict, false);
 });
 

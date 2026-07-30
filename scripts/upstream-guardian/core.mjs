@@ -214,8 +214,11 @@ function commitList(repo, headSha, upstreamSha) {
   const commits = [];
   for (let index = 0; index < parts.length; index += 2) {
     commits.push({
-      sha: parts[index],
-      subject: parts[index + 1] ?? "",
+      // `git log` places a record separator newline between consecutive
+      // NUL-delimited records. Keep subjects intact while normalizing only
+      // that transport whitespace around the machine-readable SHA.
+      sha: parts[index].trim(),
+      subject: (parts[index + 1] ?? "").replace(/\n+$/, ""),
     });
   }
   return commits;
