@@ -1,0 +1,102 @@
+name: Buzz Upstream Guardian
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: Custom integration branch to protect
+        required: true
+        default: codex/hermes-mcp-bridge
+  schedule:
+    - cron: "17 6 * * *"
+
+concurrency:
+  group: upstream-guardian
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  GUARDIAN_BASE_BRANCH: ${{ inputs.base_branch || 'codex/hermes-mcp-bridge' }}
+  GUARDIAN_OFFICIAL_REPOSITORY: block/buzz
+  GUARDIAN_OFFICIAL_BRANCH: main
+
+jobs:
+  analyze:
+    if: github.repository == 'ArnaudLafosse92100/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.GUARDIAN_BASE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Fetch official Buzz
+        run: |
+          git remote add official "https://github.com/${GUARDIAN_OFFICIAL_REPOSITORY}.git"
+          git fetch --no-tags official "${GUARDIAN_OFFICIAL_BRANCH}"
+
+      - name: Analyze compatibility
+        id: guardian
+        run: |
+          node scripts/upstream-guardian/cli.mjs analyze \
+            --upstream "official/${GUARDIAN_OFFICIAL_BRANCH}" \
+            --output-dir ".guardian-runs/${GITHUB_RUN_ID}"
+          cat ".guardian-runs/${GITHUB_RUN_ID}/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable analysis artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-guardian-${{ steps.guardian.outputs.upstream_sha }}
+          path: .guardian-runs/${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Prepare green candidate
+        if: steps.guardian.outputs.risk == 'green'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.guardian.outputs.upstream_sha }}
+        run: |
+          SHORT_SHA="${UPSTREAM_SHA:0:12}"
+          BRANCH="guardian/upstream-${SHORT_SHA}"
+          WORKTREE="${RUNNER_TEMP}/buzz-${SHORT_SHA}"
+          git config user.name "Buzz Upstream Guardian"
+          git config user.email "upstream-guardian@users.noreply.github.com"
+
+          if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            node scripts/upstream-guardian/cli.mjs prepare \
+              --upstream "official/${GUARDIAN_OFFICIAL_BRANCH}" \
+              --output-dir ".guardian-runs/${GITHUB_RUN_ID}" \
+              --branch "$BRANCH" \
+              --worktree "$WORKTREE"
+            git -C "$WORKTREE" push -u origin "$BRANCH"
+          fi
+
+          if ! gh pr list --head "$BRANCH" --base "$GUARDIAN_BASE_BRANCH" \
+            --json number --jq 'length > 0' | grep -q true; then
+            gh pr create \
+              --head "$BRANCH" \
+              --base "$GUARDIAN_BASE_BRANCH" \
+              --title "chore(guardian): integrate Buzz upstream ${SHORT_SHA}" \
+              --body-file ".guardian-runs/${GITHUB_RUN_ID}/report.md"
+          fi
+
+      - name: Open review issue for orange or red changes
+        if: steps.guardian.outputs.risk == 'orange' || steps.guardian.outputs.risk == 'red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.guardian.outputs.upstream_sha }}
+        run: |
+          SHORT_SHA="${UPSTREAM_SHA:0:12}"
+          TITLE="[Upstream Guardian] Review Buzz ${SHORT_SHA}"
+          if ! gh issue list --state open --search "\"${TITLE}\" in:title" \
+            --json title --jq 'map(select(.title == "'"$TITLE"'")) | length > 0' | grep -q true; then
+            gh issue create \
+              --title "$TITLE" \
+              --body-file ".guardian-runs/${GITHUB_RUN_ID}/report.md"
+          fi
