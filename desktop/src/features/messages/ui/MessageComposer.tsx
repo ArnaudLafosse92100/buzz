@@ -41,14 +41,10 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
-import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
-import { EmojiAutocomplete } from "./EmojiAutocomplete";
-import {
-  MentionAutocomplete,
-  type MentionSuggestion,
-} from "./MentionAutocomplete";
+import type { MentionSuggestion } from "./MentionAutocomplete";
+import { ComposerAutocompleteMenus } from "./ComposerAutocompleteMenus";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
@@ -938,29 +934,13 @@ function MessageComposerImpl({
             }}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
-            <EmojiAutocomplete
-              onSelect={applyEmojiInsert}
-              selectedIndex={emojiAutocomplete.emojiSelectedIndex}
-              suggestions={
-                emojiAutocomplete.isEmojiAutocompleteOpen
-                  ? emojiAutocomplete.emojiSuggestions
-                  : []
-              }
-            />
-            <ChannelAutocomplete
-              onSelect={applyChannelInsert}
-              selectedIndex={channelLinks.channelSelectedIndex}
-              suggestions={
-                channelLinks.isChannelOpen
-                  ? channelLinks.channelSuggestions
-                  : []
-              }
-            />
-            <MentionAutocomplete
-              onFetchMore={mentions.fetchMoreSuggestions}
-              onSelect={applyMentionInsert}
-              selectedIndex={mentions.mentionSelectedIndex}
-              suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
+            <ComposerAutocompleteMenus
+              channelLinks={channelLinks}
+              emojiAutocomplete={emojiAutocomplete}
+              mentions={mentions}
+              onChannelSelect={applyChannelInsert}
+              onEmojiSelect={applyEmojiInsert}
+              onMentionSelect={applyMentionInsert}
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">

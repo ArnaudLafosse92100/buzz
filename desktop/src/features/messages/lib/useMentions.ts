@@ -29,7 +29,6 @@ import type {
   AgentPersona,
   ChannelMember,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
@@ -40,6 +39,13 @@ import { hasMention } from "./hasMention";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
+import {
+  appendUniqueName,
+  collectMentionPubkeys,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
+  resolveMentionDisplayName,
+} from "./mentionUtilities";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
@@ -57,24 +63,6 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return null;
-}
-function appendUniqueName(current: string[], name: string): string[] {
-  return current.some(
-    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
-  )
-    ? current
-    : [...current, name];
-}
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -769,22 +757,12 @@ export function useMentions(
   );
 
   const getMentionDisplayName = React.useCallback(
-    (pubkey: string): string | null => {
-      const normalizedPubkey = normalizePubkey(pubkey);
-
-      for (const [displayName, mentionPubkey] of mentionMapRef.current) {
-        if (normalizePubkey(mentionPubkey) === normalizedPubkey) {
-          return displayName;
-        }
-      }
-
-      const candidate = mentionCandidates.find(
-        (item) =>
-          item.pubkey !== undefined &&
-          normalizePubkey(item.pubkey) === normalizedPubkey,
-      );
-      return candidate?.displayName ?? null;
-    },
+    (pubkey: string): string | null =>
+      resolveMentionDisplayName(
+        pubkey,
+        mentionMapRef.current,
+        mentionCandidates,
+      ),
     [mentionCandidates],
   );
 
@@ -831,42 +809,13 @@ export function useMentions(
   );
 
   const extractMentionPubkeys = React.useCallback(
-    (text: string): string[] => {
-      const pubkeys: string[] = [];
-      const selectedDisplayNames = new Set(
-        [
-          ...mentionMapRef.current.keys(),
-          ...personaMentionMapRef.current.keys(),
-        ].map((name) => name.trim().toLowerCase()),
-      );
-
-      for (const [displayName, pubkey] of mentionMapRef.current) {
-        if (hasMention(text, displayName)) {
-          pubkeys.push(pubkey);
-        }
-      }
-
-      for (const candidate of mentionCandidates) {
-        if (!candidate.pubkey) {
-          continue;
-        }
-        if (!candidate.isMember) {
-          continue;
-        }
-        if (pubkeys.includes(candidate.pubkey)) {
-          continue;
-        }
-        const name = candidate.displayName;
-        if (name && selectedDisplayNames.has(name.trim().toLowerCase())) {
-          continue;
-        }
-        if (name && hasMention(text, name)) {
-          pubkeys.push(candidate.pubkey);
-        }
-      }
-
-      return [...new Set(pubkeys)];
-    },
+    (text: string): string[] =>
+      collectMentionPubkeys(
+        text,
+        mentionMapRef.current,
+        personaMentionMapRef.current,
+        mentionCandidates,
+      ),
     [mentionCandidates],
   );
 
