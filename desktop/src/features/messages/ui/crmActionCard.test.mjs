@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  decodeCrmOutreachEdit,
+  encodeCrmOutreachEdit,
   extractCrmCalendarSlots,
+  extractCrmOutreachDraft,
   extractCrmRedditDraft,
   isCrmActionControlReaction,
   parseCrmActionCard,
@@ -39,6 +42,47 @@ test("parses the supported outreach approval action marker", () => {
     )?.actionType,
     "outreach_approve",
   );
+});
+
+test("extracts the outreach body into the native action card", () => {
+  const card = parseCrmActionCard(
+    [
+      "# Outreach draft ready",
+      "",
+      "**To:** camille@example.com",
+      "",
+      "## Draft",
+      "```",
+      "Bonjour Camille,\nVoici le message révisable.",
+      "```",
+      "",
+      "crm-action:v1:8ca5bd14-00d4-45cc-88ec-4bb1609e7d4a:outreach_approve:2026-07-26T20:15:00+00:00",
+    ].join("\n"),
+  );
+
+  assert.equal(
+    card?.outreachDraft,
+    "Bonjour Camille,\nVoici le message révisable.",
+  );
+  assert.equal(extractCrmOutreachDraft(card?.content ?? ""), "");
+  assert.doesNotMatch(card?.content ?? "", /## Draft/);
+});
+
+test("round-trips a unicode native edit payload and hides its transport control", () => {
+  const payload = encodeCrmOutreachEdit(
+    "Bonjour Camille — créneau confirmé ✅",
+    "revision-2",
+  );
+  const card = parseCrmActionCard(
+    "Review outreach.\ncrm-action:v1:8ca5bd14-00d4-45cc-88ec-4bb1609e7d4a:outreach_approve:2026-07-26T20:15:00+00:00",
+  );
+
+  assert.equal(
+    decodeCrmOutreachEdit(payload),
+    "Bonjour Camille — créneau confirmé ✅",
+  );
+  assert.equal(isCrmActionControlReaction(card, payload), true);
+  assert.equal(decodeCrmOutreachEdit("crm-action-edit:v1:broken"), null);
 });
 
 test("parses the supported calendar booking action marker", () => {

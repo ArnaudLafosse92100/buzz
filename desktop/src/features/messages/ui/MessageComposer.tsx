@@ -802,6 +802,20 @@ function MessageComposerImpl({
           // Restore Buzz snapshots before normal styled-HTML normalization.
           if (handleAgentSnapshotPaste(event, media.setPendingImeta))
             return true;
+
+          // A pasted @Persona is otherwise just ordinary text. Resolve exact,
+          // unambiguous agent names after TipTap's native insertion. In the
+          // macOS WebView, registering before the paste can redecorate the
+          // editor while its document still has no pasted text; the chip then
+          // appears only after the next keystroke. A single animation frame
+          // keeps routing metadata and the visual chip in the same update.
+          const plainText = event.clipboardData?.getData("text/plain") ?? "";
+          if (plainText) {
+            requestAnimationFrame(() => {
+              mentions.resolvePastedAgentMentionTokens(plainText);
+            });
+          }
+
           // Strip mention/channel wrappers that Tiptap would misread as bold.
           const html = event.clipboardData?.getData("text/html");
           if (html && hasMentionClipboardHtml(html)) {
@@ -811,7 +825,6 @@ function MessageComposerImpl({
             return true;
           }
 
-          const plainText = event.clipboardData?.getData("text/plain") ?? "";
           if (plainText.includes("\n")) {
             scrollComposerToBottom();
           }
@@ -820,7 +833,12 @@ function MessageComposerImpl({
         },
       },
     });
-  }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
+  }, [
+    media.setPendingImeta,
+    mentions.resolvePastedAgentMentionTokens,
+    richText.editor,
+    scrollComposerToBottom,
+  ]);
 
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(

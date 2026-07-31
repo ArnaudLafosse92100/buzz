@@ -101,7 +101,10 @@ const TEST_PUBKEYS = [
 // inside the rounded focus drawer. Headed rendering is correct, as is the real
 // app's WKWebView, so this is a capture-only artifact. Default stays headless so
 // CI is unaffected.
-const browser = await chromium.launch({ headless: !process.env.BUZZ_HEADED });
+const browser = await chromium.launch({
+  executablePath: process.env.BUZZ_CHROMIUM_EXECUTABLE_PATH || undefined,
+  headless: !process.env.BUZZ_HEADED,
+});
 const page = await browser.newPage({
   viewport: { width: vpWidth, height: vpHeight },
 });

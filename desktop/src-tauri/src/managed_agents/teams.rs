@@ -31,23 +31,18 @@ struct BuiltInTeam {
     persona_ids: &'static [&'static str],
 }
 
-const BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
-    id: "builtin-team:welcome",
-    name: "Welcome Team",
-    description: Some("A friendly starter trio ready to help you plan, create, and ship."),
-    persona_ids: &["builtin:fizz", "builtin:honey", "builtin:bumble"],
-}];
+const BUILT_IN_TEAMS: &[BuiltInTeam] = &[];
 
 // Built-in teams that have been retired. A stored copy that still exactly
 // matches its seed is purged on load (the user never touched it); customized
 // copies are demoted to user-owned teams by the retirement loop in
 // merge_teams_impl.
-const RETIRED_BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
-    id: "builtin-team:fizz",
-    name: "Fizz",
-    description: Some("Fizz works carefully and collaboratively."),
-    persona_ids: &["builtin:fizz"],
-}];
+const RETIRED_BUILT_IN_TEAMS: &[BuiltInTeam] = &[];
+
+// Product-owned starter teams that must disappear completely, including
+// renamed/customized copies. `builtin-team:welcome` was temporarily reused as
+// Forge Coding Team, so preserving it would keep the obsolete duplicate alive.
+const REMOVED_BUILT_IN_TEAM_IDS: &[&str] = &["builtin-team:fizz", "builtin-team:welcome"];
 
 fn built_in_team_records(built_ins: &[BuiltInTeam], now: &str) -> Vec<TeamRecord> {
     built_ins
@@ -88,6 +83,12 @@ fn merge_teams_impl(
     now: &str,
 ) -> (Vec<TeamRecord>, bool) {
     let mut changed = false;
+
+    let before = stored.len();
+    stored.retain(|record| !REMOVED_BUILT_IN_TEAM_IDS.contains(&record.id.as_str()));
+    if stored.len() != before {
+        changed = true;
+    }
 
     // Seed missing built-ins / re-promote existing ones that were downgraded.
     for built_in in built_in_team_records(built_ins, now) {

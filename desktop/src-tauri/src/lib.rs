@@ -7,6 +7,7 @@ mod deep_link;
 mod event_sync;
 mod events;
 mod huddle;
+mod local_automation;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -451,6 +452,11 @@ pub fn run() {
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
             }
+
+            // Explicit opt-in only. This is a loopback, bearer-authenticated
+            // automation surface that reuses the signed native creation paths.
+            // It must start after identity resolution and AppHandle storage.
+            local_automation::spawn_if_configured(app_handle.clone());
 
             // Bring up the runtime-owned shared-compute coordinator before
             // saved agents are restored. Its lifetime is tied to the app, not

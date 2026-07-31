@@ -87,8 +87,10 @@ pub enum MultipleEventHandling {
 
 /// Inbound author gate: which authors' events the harness forwards to the agent.
 ///
-/// - `owner-only` — only the agent's registered owner (default).
-/// - `allowlist`  — owner + explicit pubkey list (`--respond-to-allowlist`).
+/// - `owner-only` — registered owner + cryptographically verified agents with
+///   the same owner (default).
+/// - `allowlist`  — owner + same-owner agents + explicit pubkey list
+///   (`--respond-to-allowlist`).
 /// - `anyone`     — all events forwarded (no author filtering).
 /// - `nobody`     — all events dropped (proactive/heartbeat-only mode).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, clap::ValueEnum)]
@@ -243,7 +245,8 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     pub private_key: String,
 
-    /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
+    /// Agent owner pubkey (64-char hex). Used to admit the owner and verify
+    /// same-owner agent siblings for the --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
     pub agent_owner: Option<String>,
 
@@ -552,7 +555,8 @@ pub struct Config {
     pub relay_observer: bool,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
-    /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
+    /// Agent owner pubkey (hex). Used for the owner + verified-sibling
+    /// `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
     /// Disable the [Base] platform-context section prepended to every prompt.

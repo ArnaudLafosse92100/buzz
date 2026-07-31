@@ -289,9 +289,8 @@ fn migration_pristine_fizz_is_purged() {
 }
 
 #[test]
-fn migration_customized_fizz_is_demoted_to_user_team() {
-    // A stored Fizz that was renamed (or had a persona added) is retained
-    // but demoted to a user-owned team so the user can edit or delete it.
+fn migration_customized_fizz_is_purged() {
+    // Legacy product-owned teams are removed even after customization.
     let customized = TeamRecord {
         id: "builtin-team:fizz".to_string(),
         name: "Fizz (customized)".to_string(),
@@ -310,71 +309,28 @@ fn migration_customized_fizz_is_demoted_to_user_team() {
     let (records, changed) = merge_teams(vec![customized], "2026-07-01T00:00:00Z");
 
     assert!(changed);
-    let demoted = records
-        .iter()
-        .find(|t| t.id == "builtin-team:fizz")
-        .expect("customized fizz should be retained as a user-owned team");
-    assert!(!demoted.is_builtin);
-    assert_eq!(demoted.updated_at, "2026-07-01T00:00:00Z");
+    assert!(!records.iter().any(|t| t.id == "builtin-team:fizz"));
 }
 
 #[test]
-fn welcome_team_is_seeded_and_idempotent() {
+fn welcome_team_is_not_seeded() {
     let (records, changed) = merge_teams(Vec::new(), "2026-07-01T00:00:00Z");
 
-    assert!(changed);
-    assert_eq!(records.len(), 1);
-    let welcome = &records[0];
-    assert_eq!(welcome.id, "builtin-team:welcome");
-    assert_eq!(welcome.name, "Welcome Team");
-    assert_eq!(
-        welcome.description.as_deref(),
-        Some("A friendly starter trio ready to help you plan, create, and ship.")
-    );
-    assert_eq!(
-        welcome.persona_ids,
-        vec![
-            "builtin:fizz".to_string(),
-            "builtin:honey".to_string(),
-            "builtin:bumble".to_string(),
-        ]
-    );
-    assert!(welcome.is_builtin);
-
-    let expected = serde_json::to_value(&records).unwrap();
-    let (records_after_second_merge, changed) = merge_teams(records, "2026-07-02T00:00:00Z");
     assert!(!changed);
-    assert_eq!(
-        serde_json::to_value(records_after_second_merge).unwrap(),
-        expected
-    );
+    assert!(records.is_empty());
 }
 
 #[test]
-fn welcome_team_seed_does_not_overwrite_customization() {
-    let (mut records, _) = merge_teams(Vec::new(), "2026-07-01T00:00:00Z");
-    let welcome = records
-        .iter_mut()
-        .find(|team| team.id == "builtin-team:welcome")
-        .expect("welcome team should be seeded");
-    welcome.name = "My Welcome Team".to_string();
-    welcome.description = Some("My customized starter team.".to_string());
-    welcome.persona_ids = vec!["builtin:honey".to_string()];
+fn customized_welcome_or_forge_team_is_purged() {
+    let mut welcome = team("builtin-team:welcome", "Forge Coding Team");
+    welcome.is_builtin = true;
+    welcome.description = Some("Customized implementation team".to_string());
+    welcome.persona_ids = vec!["custom:merlin".to_string()];
 
-    let (records, changed) = merge_teams(records, "2026-07-02T00:00:00Z");
+    let (records, changed) = merge_teams(vec![welcome], "2026-07-02T00:00:00Z");
 
-    assert!(!changed);
-    let welcome = records
-        .iter()
-        .find(|team| team.id == "builtin-team:welcome")
-        .expect("customized welcome team should be preserved");
-    assert_eq!(welcome.name, "My Welcome Team");
-    assert_eq!(
-        welcome.description.as_deref(),
-        Some("My customized starter team.")
-    );
-    assert_eq!(welcome.persona_ids, vec!["builtin:honey".to_string()]);
-    assert!(welcome.is_builtin);
+    assert!(changed);
+    assert!(records.is_empty());
 }
 
 // ── load_teams_readonly tests ──────────────────────────────────────────
@@ -389,9 +345,8 @@ fn load_teams_readonly_absent_file_performs_no_write() {
 
     let records = load_teams_readonly(&path).unwrap();
 
-    // Returns the merged built-in list without persisting it.
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].id, "builtin-team:welcome");
+    // No product-owned starter team is synthesized.
+    assert!(records.is_empty());
 
     // The file must still NOT exist — no write-on-load side effect.
     assert!(

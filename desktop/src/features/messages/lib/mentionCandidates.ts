@@ -1,6 +1,7 @@
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import type { AgentPersona, AgentTeam, ChannelRole } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { hasMention } from "./hasMention";
 
 export type TeamMentionMember = {
   displayName: string;
@@ -26,6 +27,80 @@ export type MentionCandidate = {
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
 };
+
+export type PastedAgentMentionTarget =
+  | {
+      kind: "pubkey";
+      displayName: string;
+      pubkey: string;
+    }
+  | {
+      kind: "persona";
+      displayName: string;
+      personaId: string;
+    };
+
+/**
+ * Resolve plain-text `@Name` tokens pasted into the composer.
+ *
+ * Only known agents/personas are eligible. A display name that identifies more
+ * than one target remains plain text rather than accidentally notifying or
+ * provisioning the wrong agent. `hasMention` also rejects email addresses and
+ * Markdown code, so those strings never become implicit agent mentions.
+ */
+export function resolvePastedAgentMentions(
+  text: string,
+  candidates: readonly MentionCandidate[],
+): PastedAgentMentionTarget[] {
+  const byName = new Map<
+    string,
+    { displayName: string; targets: PastedAgentMentionTarget[] }
+  >();
+
+  for (const candidate of candidates) {
+    if (!candidate.isAgent || candidate.kind === "team") continue;
+
+    const displayName = candidate.displayName?.trim();
+    if (!displayName) continue;
+
+    const target = candidate.pubkey
+      ? ({ kind: "pubkey", displayName, pubkey: candidate.pubkey } as const)
+      : candidate.kind === "persona" && candidate.personaId
+        ? ({
+            kind: "persona",
+            displayName,
+            personaId: candidate.personaId,
+          } as const)
+        : null;
+    if (!target) continue;
+
+    const normalizedName = displayName.toLowerCase();
+    const current = byName.get(normalizedName) ?? {
+      displayName,
+      targets: [],
+    };
+    const targetKey =
+      target.kind === "pubkey"
+        ? `pubkey:${target.pubkey.toLowerCase()}`
+        : `persona:${target.personaId}`;
+    const isDuplicate = current.targets.some((existing) => {
+      const existingKey =
+        existing.kind === "pubkey"
+          ? `pubkey:${existing.pubkey.toLowerCase()}`
+          : `persona:${existing.personaId}`;
+      return existingKey === targetKey;
+    });
+    if (!isDuplicate) current.targets.push(target);
+    byName.set(normalizedName, current);
+  }
+
+  const resolved: PastedAgentMentionTarget[] = [];
+  for (const { displayName, targets } of byName.values()) {
+    if (targets.length !== 1 || !hasMention(text, displayName)) continue;
+    resolved.push(targets[0]);
+  }
+  return resolved;
+}
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (

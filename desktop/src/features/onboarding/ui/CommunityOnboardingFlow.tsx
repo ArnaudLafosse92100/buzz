@@ -23,9 +23,7 @@ import {
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
-import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
-import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
@@ -48,12 +46,6 @@ function isRelayMembershipDeniedError(error: unknown): boolean {
     error.message.includes("invalid: you are not a relay member")
   );
 }
-
-const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
-  Fizz: "/onboarding/starter-team/fizz.png",
-  Honey: "/onboarding/starter-team/honey.png",
-  Bumble: "/onboarding/starter-team/bumble.png",
-};
 
 /** Fade duration for the "entering" curtain over the mounting app. */
 const ENTERING_CURTAIN_FADE_MS = 500;
@@ -156,9 +148,6 @@ export function CommunityOnboardingFlow({
   const avatarPresentation = useAvatarPresentation(avatarUrl);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
-  const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
-    [],
-  );
   const [isPending, setIsPending] = React.useState(false);
   const [starterChannelFailureCount, setStarterChannelFailureCount] =
     React.useState(0);
@@ -172,28 +161,6 @@ export function CommunityOnboardingFlow({
   const avatarEditorContentRef = React.useRef<HTMLDivElement | null>(null);
   const [avatarEditorDialogHeight, setAvatarEditorDialogHeight] =
     React.useState<number | null>(null);
-
-  // Also fetch on "entering": the curtain is a fresh mount of this component,
-  // so the team-intro fetch from the pre-curtain instance isn't in this state.
-  const isTeamIntroVisible =
-    transaction?.stage === "team-intro" ||
-    transaction?.stage === "finalizing" ||
-    transaction?.stage === "entering";
-  React.useEffect(() => {
-    if (!isTeamIntroVisible) return;
-    void listPersonas()
-      .then((personas) =>
-        setStarterPersonas(
-          ["Fizz", "Honey", "Bumble"].flatMap((name) => {
-            const persona = personas.find(
-              (candidate) => candidate.displayName === name,
-            );
-            return persona ? [persona] : [];
-          }),
-        ),
-      )
-      .catch(() => setStarterPersonas([]));
-  }, [isTeamIntroVisible]);
 
   useClaimInvite();
 
@@ -617,44 +584,17 @@ export function CommunityOnboardingFlow({
             </>
           ) : (
             <>
-              <h1 className="text-title font-normal">Meet your starter team</h1>
+              <h1 className="text-title font-normal">
+                Your workspace is ready
+              </h1>
               <p className="mx-auto mt-3 max-w-[400px] text-sm leading-6 text-foreground/80">
-                Buzz lets you bring multiple agents into the same workspace.
-                Your team will help you get started using Buzz.
+                Buzz lets you add the agents you need and bring several of them
+                into the same conversation.
               </p>
               <div className="flex w-full flex-1 items-center justify-center py-10">
-                {starterPersonas.length > 0 ? (
-                  <div className="flex flex-wrap justify-center gap-8">
-                    {starterPersonas.map((persona) => {
-                      const animationUrl =
-                        STARTER_PERSONA_ANIMATIONS[persona.displayName];
-                      return (
-                        <div
-                          className="flex w-40 flex-col items-center gap-3"
-                          key={persona.id}
-                        >
-                          {animationUrl ? (
-                            <img
-                              alt={`${persona.displayName} animated character`}
-                              className="h-40 w-40 object-contain"
-                              data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
-                              src={animationUrl}
-                            />
-                          ) : (
-                            <ProfileAvatar
-                              avatarUrl={persona.avatarUrl}
-                              className="h-28 w-28 text-3xl"
-                              label={persona.displayName}
-                            />
-                          )}
-                          <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
-                            {persona.displayName}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
+                <div className="flex h-40 w-40 items-center justify-center rounded-full bg-foreground/5">
+                  <Users aria-hidden className="h-16 w-16 text-foreground/70" />
+                </div>
               </div>
               {transaction.error ? (
                 <p className="text-sm text-destructive">

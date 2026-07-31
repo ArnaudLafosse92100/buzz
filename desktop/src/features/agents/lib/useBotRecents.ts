@@ -5,10 +5,6 @@ import type { AgentPersona } from "@/shared/api/types";
 const STORAGE_KEY = "buzz:bot-recents";
 const MAX_RECENTS = 8;
 
-// Default persona display names to seed the list when empty.
-// These are resolved to IDs by the consumer.
-export const DEFAULT_PERSONA_NAMES = ["Fizz", "Honey", "Bumble"] as const;
-
 export function pickQuickBotPersonas(
   personas: readonly AgentPersona[],
   recentIds: readonly string[],
@@ -36,18 +32,7 @@ export function pickQuickBotPersonas(
     addPersona(personas.find((persona) => persona.id === id));
   }
 
-  for (const name of DEFAULT_PERSONA_NAMES) {
-    if (resolved.length >= maxCount) {
-      break;
-    }
-
-    addPersona(
-      personas.find(
-        (persona) => persona.displayName.toLowerCase() === name.toLowerCase(),
-      ),
-    );
-  }
-
+  // No product-owned persona is privileged. Fall back to catalog order.
   for (const persona of personas) {
     if (resolved.length >= maxCount) {
       break;

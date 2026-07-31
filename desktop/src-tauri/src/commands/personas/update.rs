@@ -25,7 +25,7 @@ mod name_propagation_tests;
 #[derive(Debug, serde::Serialize)]
 pub struct UpdatePersonaResult {
     #[serde(flatten)]
-    persona: AgentDefinition,
+    pub persona: AgentDefinition,
 }
 
 /// Propagate a persona definition's display_name rename to linked agent instances.

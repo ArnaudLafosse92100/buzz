@@ -20,7 +20,7 @@ function createPersona(id, displayName) {
 
 test("pickQuickBotPersonas prefers recents before defaults", () => {
   const personas = [
-    createPersona("builtin:fizz", "Fizz"),
+    createPersona("custom:builder", "Builder"),
     createPersona("builtin:reviewer", "Reviewer"),
   ];
 
@@ -28,21 +28,21 @@ test("pickQuickBotPersonas prefers recents before defaults", () => {
     pickQuickBotPersonas(personas, ["builtin:reviewer"]).map(
       (persona) => persona.id,
     ),
-    ["builtin:reviewer", "builtin:fizz"],
+    ["builtin:reviewer", "custom:builder"],
   );
 });
 
-test("pickQuickBotPersonas seeds the three starter agents", () => {
+test("pickQuickBotPersonas uses catalog order when there are no recents", () => {
   const personas = [
-    createPersona("builtin:bumble", "Bumble"),
-    createPersona("builtin:honey", "Honey"),
-    createPersona("builtin:fizz", "Fizz"),
+    createPersona("custom:builder", "Builder"),
+    createPersona("custom:researcher", "Researcher"),
+    createPersona("custom:planner", "Planner"),
     createPersona("builtin:reviewer", "Reviewer"),
   ];
 
   assert.deepEqual(
     pickQuickBotPersonas(personas, []).map((persona) => persona.id),
-    ["builtin:fizz", "builtin:honey", "builtin:bumble"],
+    ["custom:builder", "custom:researcher", "custom:planner"],
   );
 });
 
@@ -61,17 +61,17 @@ test("pickQuickBotPersonas falls back to any active personas when defaults are m
 
 test("pickQuickBotPersonas skips duplicate and missing recents", () => {
   const personas = [
-    createPersona("builtin:fizz", "Fizz"),
-    createPersona("custom:honey", "Honey"),
+    createPersona("custom:builder", "Builder"),
+    createPersona("custom:researcher", "Researcher"),
   ];
 
   assert.deepEqual(
     pickQuickBotPersonas(personas, [
-      "builtin:fizz",
+      "custom:builder",
       "missing",
-      "builtin:fizz",
-      "custom:honey",
+      "custom:builder",
+      "custom:researcher",
     ]).map((persona) => persona.id),
-    ["builtin:fizz", "custom:honey"],
+    ["custom:builder", "custom:researcher"],
   );
 });

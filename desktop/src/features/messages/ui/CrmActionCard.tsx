@@ -11,15 +11,25 @@ import {
 
 import type { TimelineReaction } from "@/features/messages/types";
 import {
+  decodeCrmOutreachEdit,
+  encodeCrmOutreachEdit,
   extractCrmRedditDraft,
   type CrmActionCard as CrmAction,
 } from "@/features/messages/ui/crmActionCardParser";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/shared/ui/dialog";
+import { Textarea } from "@/shared/ui/textarea";
 
 const APPROVE_EMOJI = "✅";
 const CANCEL_EMOJI = "❌";
-const EDIT_EMOJI = "✏️";
 const LEAD_CATEGORY_CHOICES = [
   { label: "Interested", reaction: "👍" },
   { label: "Meeting Request", reaction: "📅" },
@@ -78,6 +88,9 @@ export function CrmActionCard({
   const [selectedReaction, setSelectedReaction] = React.useState<string | null>(
     null,
   );
+  const [editOpen, setEditOpen] = React.useState(false);
+  const [editBody, setEditBody] = React.useState("");
+  const [editError, setEditError] = React.useState<string | null>(null);
   const expiresAt = Date.parse(action.expiresAt);
   const expired = !Number.isFinite(expiresAt) || Date.now() >= expiresAt;
   const decided = reactions.some(
@@ -90,6 +103,15 @@ export function CrmActionCard({
     action.actionType === "reddit_mark_posted"
       ? extractCrmRedditDraft(action.content)
       : null;
+  const latestOutreachEdit =
+    action.actionType === "outreach_approve"
+      ? ([...reactions]
+          .reverse()
+          .filter((reaction) => reaction.reactedByCurrentUser)
+          .map((reaction) => decodeCrmOutreachEdit(reaction.emoji))
+          .find((body): body is string => body !== null) ?? null)
+      : null;
+  const outreachDraft = latestOutreachEdit ?? action.outreachDraft ?? "";
   const calendarSlots =
     action.actionType === "calendar_book" ? (action.calendarSlots ?? []) : [];
   const leadControlReactions =
@@ -252,10 +274,45 @@ export function CrmActionCard({
   }
 
   if (action.actionType === "outreach_approve") {
+    const unchanged = editBody.trim() === outreachDraft.trim();
+    const invalidEdit = editBody.trim().length < 5 || editBody.length > 12_000;
+
+    const openEditor = () => {
+      setEditBody(outreachDraft);
+      setEditError(null);
+      setEditOpen(true);
+    };
+
+    const saveEdit = async () => {
+      if (invalidEdit || unchanged || pending) return;
+      setEditError(null);
+      try {
+        await onSelect(encodeCrmOutreachEdit(editBody));
+        setEditOpen(false);
+      } catch (error) {
+        setEditError(
+          error instanceof Error
+            ? error.message
+            : "Buzz could not save this revision.",
+        );
+      }
+    };
+
     return (
-      <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
+      <div
+        className="my-2 max-w-xl rounded-lg border border-input/50 bg-muted/20 p-3"
+        data-testid="crm-outreach-action"
+      >
         <p className="text-sm font-medium">Review outreach draft</p>
-        <div className="mt-3 flex gap-2">
+        <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg bg-background px-3 py-2 text-sm leading-6">
+          {outreachDraft || "The draft body is unavailable."}
+        </div>
+        {latestOutreachEdit ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Revision submitted in Buzz. The CRM will confirm it before approval.
+          </p>
+        ) : null}
+        <div className="mt-3 flex flex-wrap gap-2">
           <Button
             disabled={disabled}
             onClick={() => void onSelect(APPROVE_EMOJI)}
@@ -266,8 +323,9 @@ export function CrmActionCard({
             Approve and send
           </Button>
           <Button
+            data-testid="crm-edit-draft"
             disabled={disabled}
-            onClick={() => void onSelect(EDIT_EMOJI)}
+            onClick={openEditor}
             size="sm"
             type="button"
             variant="outline"
@@ -286,6 +344,53 @@ export function CrmActionCard({
             Reject draft
           </Button>
         </div>
+        <Dialog open={editOpen} onOpenChange={setEditOpen}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Edit outreach draft</DialogTitle>
+              <DialogDescription>
+                Review the complete message here. Saving creates a new audited
+                CRM revision; it does not send the message.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium" htmlFor="crm-draft-body">
+                Message
+              </label>
+              <Textarea
+                autoFocus
+                className="min-h-64 resize-y leading-6"
+                id="crm-draft-body"
+                maxLength={12_000}
+                onChange={(event) => setEditBody(event.target.value)}
+                value={editBody}
+              />
+              <div className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
+                <span>
+                  {editError ??
+                    "The revised text remains pending until you approve it."}
+                </span>
+                <span>{editBody.length.toLocaleString()} / 12,000</span>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                onClick={() => setEditOpen(false)}
+                type="button"
+                variant="outline"
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={invalidEdit || unchanged || pending}
+                onClick={() => void saveEdit()}
+                type="button"
+              >
+                {pending ? "Saving…" : "Save revision"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }

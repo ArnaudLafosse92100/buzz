@@ -187,3 +187,66 @@ test("message with agent mention delivers correctly when no channel switch occur
     MESSAGE_TEXT,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Paste behavior: a raw @agent token must become a real routed mention
+// ---------------------------------------------------------------------------
+
+test("pasted @managed-agent text resolves to a routed agent mention", async ({
+  page,
+}) => {
+  const MESSAGE_TEXT = `paste-mention-verify-${Date.now()}`;
+
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:4173",
+  });
+  await installMockBridge(page, {
+    addChannelMembersDelayMs: 0,
+    managedAgents: [
+      {
+        pubkey: OUT_OF_CHANNEL_BOT_PUBKEY,
+        name: "BotA",
+        status: "running",
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await page.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    `@BotA ${MESSAGE_TEXT}`,
+  );
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+V");
+
+  // Unlike ordinary text, the pasted token now receives the same rich visual
+  // treatment and routing metadata as selecting BotA from autocomplete.
+  await expect(
+    input.locator(".agent-mention-highlight", { hasText: "BotA" }),
+  ).toBeVisible();
+
+  const baselineCommands = await readCommandLog(page);
+  const baselineAddCount = commandCount(
+    baselineCommands,
+    "add_channel_members",
+  );
+
+  await page.getByTestId("send-message").click();
+
+  // BotA is not a member of general. Resolving the pasted token must therefore
+  // take the native managed-agent attach path before the message is sent.
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "add_channel_members"),
+    )
+    .toBeGreaterThan(baselineAddCount);
+
+  await waitForTimelineSettled(page);
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    MESSAGE_TEXT,
+  );
+});

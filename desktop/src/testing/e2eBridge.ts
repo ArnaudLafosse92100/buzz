@@ -201,7 +201,6 @@ type E2eConfig = {
     connectAcpRuntimeError?: string;
     /** Catalog returned after a successful mocked connect (sign-in). */
     acpRuntimesCatalogAfterConnect?: RawAcpRuntimeCatalogEntry[];
-    activePersonaIds?: string[];
     installAcpRuntimeDelayMs?: number;
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
@@ -2151,43 +2150,7 @@ function resetMockManagedAgents(config?: E2eConfig) {
 
 function resetMockPersonas(config?: E2eConfig) {
   const now = new Date().toISOString();
-  const activePersonaIds = new Set(config?.mock?.activePersonaIds ?? []);
-  const builtInPersonas = [
-    {
-      id: "builtin:fizz",
-      display_name: "Fizz",
-      avatar_url: null,
-      system_prompt: "You are Fizz.",
-    },
-    {
-      id: "builtin:honey",
-      display_name: "Honey",
-      avatar_url: null,
-      system_prompt: "You are Honey.",
-    },
-    {
-      id: "builtin:bumble",
-      display_name: "Bumble",
-      avatar_url: null,
-      system_prompt: "You are Bumble.",
-    },
-  ];
-  mockPersonas = builtInPersonas.map((persona) => ({
-    id: persona.id,
-    display_name: persona.display_name,
-    avatar_url: persona.avatar_url,
-    system_prompt: persona.system_prompt,
-    runtime: null,
-    model: null,
-    provider: null,
-    name_pool: [],
-    is_builtin: true,
-    is_active: activePersonaIds.has(persona.id),
-    shared: false,
-    source_team: null,
-    created_at: now,
-    updated_at: now,
-  }));
+  mockPersonas = [];
 
   for (const persona of config?.mock?.personas ?? []) {
     mockPersonas.push({

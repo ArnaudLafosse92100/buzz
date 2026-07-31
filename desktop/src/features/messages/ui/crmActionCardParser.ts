@@ -10,6 +10,7 @@ export type CrmActionCard = {
   content: string;
   calendarSlots?: CrmCalendarSlot[];
   leadControlChoices?: string[];
+  outreachDraft?: string;
 };
 
 export type CrmCalendarSlot = { label: string; reaction: string };
@@ -24,6 +25,7 @@ const CONTROL_REACTIONS: Record<
   calendar_book: ["1️⃣", "2️⃣", "3️⃣", "❌"],
   lead_control: ["⛔", "🏢", "🗑️", "✅"],
 };
+const OUTREACH_EDIT_PREFIX = "crm-action-edit:v1:";
 
 const MARKER =
   /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book|lead_control):(\S+)\s*$/i;
@@ -33,6 +35,8 @@ const CALENDAR_SLOT = /^\*\*Slot ([1-3]):\*\*\s*(.+)$/gim;
 const LEAD_CONTROL_OPTIONS =
   /(?:^|\n)crm-action-options:v1:lead_control:([^\n]+)\s*(?=\n|$)/i;
 const LEAD_CONTROL_REACTIONS = new Set(["⛔", "🏢", "🗑️"]);
+const OUTREACH_DRAFT =
+  /(?:^|\n)## Draft\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
 const ACTION_HEADER =
   /^\[CRM Buzz action [0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\]\s*\n?/i;
 const ACTION_FOOTERS: Record<CrmActionCard["actionType"], RegExp> = {
@@ -55,7 +59,8 @@ function readableContent(
   const readable = body
     .replace(ACTION_HEADER, "")
     .replace(ACTION_FOOTERS[actionType], "")
-    .replace(LEAD_CONTROL_OPTIONS, "");
+    .replace(LEAD_CONTROL_OPTIONS, "")
+    .replace(actionType === "outreach_approve" ? OUTREACH_DRAFT : /$^/, "");
 
   return (
     actionType === "calendar_book"
@@ -94,6 +99,9 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
       action.leadControlChoices = choices;
     }
   }
+  if (action.actionType === "outreach_approve") {
+    action.outreachDraft = extractCrmOutreachDraft(body.slice(0, match.index));
+  }
 
   return action;
 }
@@ -104,8 +112,50 @@ export function isCrmActionControlReaction(
   emoji: string,
 ): boolean {
   return Boolean(
-    action && CONTROL_REACTIONS[action.actionType].includes(emoji),
+    action &&
+      (CONTROL_REACTIONS[action.actionType].includes(emoji) ||
+        (action.actionType === "outreach_approve" &&
+          emoji.startsWith(OUTREACH_EDIT_PREFIX))),
   );
+}
+
+export function extractCrmOutreachDraft(content: string): string {
+  return OUTREACH_DRAFT.exec(content)?.[2] ?? "";
+}
+
+export function encodeCrmOutreachEdit(
+  body: string,
+  nonce = crypto.randomUUID(),
+): string {
+  const bytes = new TextEncoder().encode(body);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+  return `${OUTREACH_EDIT_PREFIX}${nonce}:${encoded}`;
+}
+
+export function decodeCrmOutreachEdit(payload: string): string | null {
+  if (!payload.startsWith(OUTREACH_EDIT_PREFIX)) return null;
+  const separator = payload.indexOf(":", OUTREACH_EDIT_PREFIX.length);
+  if (separator < 0) return null;
+  const encoded = payload.slice(separator + 1);
+  if (!encoded) return null;
+  try {
+    const padded = encoded
+      .replaceAll("-", "+")
+      .replaceAll("_", "/")
+      .padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    );
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 /** Return only the explicitly delimited read-only Reddit draft, if present. */

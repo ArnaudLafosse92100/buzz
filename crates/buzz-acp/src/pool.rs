@@ -2795,7 +2795,10 @@ async fn fetch_thread_context(
         ])
         .custom_tags(e_tag, [root_event_id])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit as usize);
+        // Fetch one sentinel reply beyond the prompt budget. Without it, a
+        // full page is indistinguishable from a complete thread and Buzz can
+        // falsely tell the agent that no earlier replies were omitted.
+        .limit(limit.saturating_add(1) as usize);
 
     fetch_with_retry(|| async {
         match timeout(
@@ -2804,7 +2807,7 @@ async fn fetch_thread_context(
         )
         .await
         {
-            Ok(Ok(json)) => parse_nostr_thread_response(json, root_event_id),
+            Ok(Ok(json)) => parse_nostr_thread_response(json, root_event_id, limit),
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -2981,6 +2984,7 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
 fn parse_nostr_thread_response(
     json: serde_json::Value,
     root_event_id: &str,
+    limit: u32,
 ) -> Option<ConversationContext> {
     let events = json.as_array()?;
     let mut root_msg = None;
@@ -3002,6 +3006,15 @@ fn parse_nostr_thread_response(
 
     // Sort replies chronologically.
     reply_msgs.sort_by_key(|(ts, _)| *ts);
+    let reply_limit = limit as usize;
+    let truncated = reply_msgs.len() > reply_limit;
+    let observed_total = reply_msgs.len() + usize::from(root_msg.is_some());
+    if truncated {
+        // The relay returns the newest page. Preserve the newest replies while
+        // keeping them chronological inside the prompt.
+        let excess = reply_msgs.len() - reply_limit;
+        reply_msgs.drain(..excess);
+    }
 
     let mut messages = Vec::new();
     if let Some(root) = root_msg {
@@ -3009,15 +3022,16 @@ fn parse_nostr_thread_response(
     }
     messages.extend(reply_msgs.into_iter().map(|(_, msg)| msg));
 
-    let total = messages.len();
     if messages.is_empty() {
         return None;
     }
 
     Some(ConversationContext::Thread {
         messages,
-        total,
-        truncated: false, // query returns all within limit
+        // This is the exact observed count when complete and a truthful lower
+        // bound when the sentinel proves that older replies exist.
+        total: observed_total,
+        truncated,
     })
 }
 
@@ -4092,6 +4106,94 @@ mod tests {
         // Malformed JSON — no root, no replies key.
         let json = json!({ "something": "else" });
         assert!(parse_thread_response(json).is_none());
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_complete_page_is_not_truncated() {
+        let root_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let json = json!([
+            { "id": root_id, "pubkey": "root", "content": "root", "created_at": 10 },
+            { "id": "reply-2", "pubkey": "two", "content": "second", "created_at": 30 },
+            { "id": "reply-1", "pubkey": "one", "content": "first", "created_at": 20 }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 3).expect("should parse");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(
+                    messages
+                        .iter()
+                        .map(|msg| msg.content.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["root", "first", "second"]
+                );
+                assert_eq!(total, 3);
+                assert!(!truncated);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_sentinel_marks_truncation_and_keeps_newest() {
+        let root_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let json = json!([
+            { "id": root_id, "pubkey": "root", "content": "root", "created_at": 10 },
+            { "id": "reply-3", "pubkey": "three", "content": "newest", "created_at": 40 },
+            { "id": "reply-1", "pubkey": "one", "content": "oldest reply", "created_at": 20 },
+            { "id": "reply-2", "pubkey": "two", "content": "middle", "created_at": 30 }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2).expect("should parse");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(
+                    messages
+                        .iter()
+                        .map(|msg| msg.content.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["root", "middle", "newest"]
+                );
+                assert_eq!(
+                    total, 4,
+                    "total is the observed lower bound including sentinel"
+                );
+                assert!(truncated);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_zero_reply_budget_keeps_root() {
+        let root_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let json = json!([
+            { "id": root_id, "pubkey": "root", "content": "root", "created_at": 10 },
+            { "id": "reply", "pubkey": "one", "content": "reply", "created_at": 20 }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 0).expect("root should survive");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "root");
+                assert_eq!(total, 2);
+                assert!(truncated);
+            }
+            _ => panic!("expected Thread context"),
+        }
     }
 
     #[test]

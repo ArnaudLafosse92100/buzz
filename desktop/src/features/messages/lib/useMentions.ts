@@ -44,6 +44,7 @@ import {
   buildTeamMentionCandidates,
   formatTeamMention,
   globalSearchIdentityKey,
+  resolvePastedAgentMentions,
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
@@ -705,6 +706,44 @@ export function useMentions(
     [],
   );
 
+  const registerMentionPersona = React.useCallback(
+    (displayName: string, personaId: string) => {
+      const trimmedName = displayName.trim();
+      if (!trimmedName) return;
+
+      personaMentionMapRef.current.set(trimmedName, personaId);
+      mentionMapRef.current.delete(trimmedName);
+      trimMapToSize(personaMentionMapRef.current, 200);
+
+      setSelectedMentionNames((current) =>
+        appendUniqueName(current, trimmedName),
+      );
+      setSelectedAgentMentionNames((current) => {
+        const next = appendUniqueName(current, trimmedName);
+        selectedAgentMentionNamesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const resolvePastedAgentMentionTokens = React.useCallback(
+    (text: string) => {
+      const targets = resolvePastedAgentMentions(text, mentionCandidates);
+      for (const target of targets) {
+        if (target.kind === "pubkey") {
+          registerMentionPubkey(target.displayName, target.pubkey, {
+            isAgent: true,
+          });
+        } else {
+          registerMentionPersona(target.displayName, target.personaId);
+        }
+      }
+      return targets.length;
+    },
+    [mentionCandidates, registerMentionPersona, registerMentionPubkey],
+  );
+
   const insertResolvedMention = React.useCallback(
     ({
       displayName,
@@ -987,6 +1026,7 @@ export function useMentions(
     memberPubkeys,
     mentionSelectedIndex,
     registerMentionPubkey,
+    resolvePastedAgentMentionTokens,
     restoreDraftMentionRefs,
     suggestions,
     fetchMoreSuggestions,

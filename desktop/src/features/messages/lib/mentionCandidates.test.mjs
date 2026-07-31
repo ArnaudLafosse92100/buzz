@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
+  resolvePastedAgentMentions,
 } from "./mentionCandidates.ts";
 
 function persona(id, displayName, isActive = true) {
@@ -165,6 +166,93 @@ test("teams with identity and persona display-name collisions are not suggested"
         ]),
       ],
       personas,
+      candidates,
+    ),
+    [],
+  );
+});
+
+test("plain pasted @agent tokens resolve to their managed-agent pubkeys", () => {
+  assert.deepEqual(
+    resolvePastedAgentMentions("@Moana and @Basil: inspect this.", [
+      {
+        kind: "identity",
+        displayName: "Moana",
+        pubkey: "a".repeat(64),
+        isAgent: true,
+        isMember: false,
+      },
+      {
+        kind: "identity",
+        displayName: "Basil",
+        pubkey: "b".repeat(64),
+        isAgent: true,
+        isMember: true,
+      },
+    ]),
+    [
+      { kind: "pubkey", displayName: "Moana", pubkey: "a".repeat(64) },
+      { kind: "pubkey", displayName: "Basil", pubkey: "b".repeat(64) },
+    ],
+  );
+});
+
+test("plain pasted @persona tokens preserve persona provisioning", () => {
+  assert.deepEqual(
+    resolvePastedAgentMentions("Please ask @Rapunzel to inspect the image.", [
+      {
+        kind: "persona",
+        displayName: "Rapunzel",
+        personaId: "rapunzel-persona",
+        isAgent: true,
+        isMember: false,
+      },
+    ]),
+    [
+      {
+        kind: "persona",
+        displayName: "Rapunzel",
+        personaId: "rapunzel-persona",
+      },
+    ],
+  );
+});
+
+test("pasted agent resolution rejects people, email addresses, code, and ambiguity", () => {
+  const candidates = [
+    {
+      kind: "identity",
+      displayName: "Moana",
+      pubkey: "a".repeat(64),
+      isAgent: true,
+      isMember: false,
+    },
+    {
+      kind: "identity",
+      displayName: "Arnaud",
+      pubkey: "c".repeat(64),
+      isAgent: false,
+      isMember: true,
+    },
+    {
+      kind: "persona",
+      displayName: "Duplicate",
+      personaId: "one",
+      isAgent: true,
+      isMember: false,
+    },
+    {
+      kind: "persona",
+      displayName: "Duplicate",
+      personaId: "two",
+      isAgent: true,
+      isMember: false,
+    },
+  ];
+
+  assert.deepEqual(
+    resolvePastedAgentMentions(
+      "arnaud@Moana.example `@Moana` @Arnaud @Duplicate",
       candidates,
     ),
     [],
