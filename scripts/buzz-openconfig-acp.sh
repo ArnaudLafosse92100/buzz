@@ -35,6 +35,10 @@ if [[ "$runtime_config_dir" == "$openconfig_dir" ]]; then
     echo "buzz-openconfig-acp: runtime config directory must differ from OpenConfig source" >&2
     exit 64
 fi
+if ! command -v jq >/dev/null 2>&1; then
+    echo "buzz-openconfig-acp: jq is required" >&2
+    exit 69
+fi
 xdg_opencode_dir="$runtime_xdg_config_home/opencode"
 if [[ -e "$xdg_opencode_dir" && ! -L "$xdg_opencode_dir" ]]; then
     echo "buzz-openconfig-acp: refusing to replace runtime XDG config entry: $xdg_opencode_dir" >&2
@@ -50,8 +54,7 @@ for config_entry in \
     skills \
     teams \
     agents \
-    projects.json \
-    tui.json; do
+    projects.json; do
     source_path="$openconfig_dir/$config_entry"
     target_path="$runtime_config_dir/$config_entry"
     [[ -e "$source_path" ]] || continue
@@ -61,6 +64,47 @@ for config_entry in \
     fi
     ln -sfn "$source_path" "$target_path"
 done
+
+# OpenCode's TUI attention settings are process-wide. Reusing the pinned
+# `tui.json` verbatim makes every headless Buzz ACP session emit its own macOS
+# "Agent is ready for input" notification. Generate a Buzz-owned runtime copy
+# instead: preserve every upstream TUI preference while disabling only native
+# OpenCode notifications. The pinned source remains untouched, so ordinary
+# OpenCode sessions keep their existing notification behavior.
+source_tui="$openconfig_dir/tui.json"
+runtime_tui="$runtime_config_dir/tui.json"
+if [[ -e "$runtime_tui" && ! -f "$runtime_tui" ]]; then
+    echo "buzz-openconfig-acp: refusing to replace non-file runtime TUI config: $runtime_tui" >&2
+    exit 73
+fi
+if [[ -e "$source_tui" && ! -r "$source_tui" ]]; then
+    echo "buzz-openconfig-acp: OpenConfig TUI config is not readable: $source_tui" >&2
+    exit 66
+fi
+if [[ -e "$source_tui" ]] && ! jq -e 'type == "object"' "$source_tui" >/dev/null; then
+    echo "buzz-openconfig-acp: OpenConfig TUI config must be a JSON object: $source_tui" >&2
+    exit 65
+fi
+runtime_tui_tmp="$(mktemp "$runtime_config_dir/.tui.json.XXXXXX")"
+if [[ -e "$source_tui" ]]; then
+    if ! jq '.attention = ((.attention // {}) + {notifications: false})' \
+        "$source_tui" >"$runtime_tui_tmp"; then
+        rm -f -- "$runtime_tui_tmp"
+        echo "buzz-openconfig-acp: failed to generate Buzz TUI config" >&2
+        exit 74
+    fi
+else
+    if ! jq -n '{attention: {notifications: false}}' >"$runtime_tui_tmp"; then
+        rm -f -- "$runtime_tui_tmp"
+        echo "buzz-openconfig-acp: failed to generate minimal Buzz TUI config" >&2
+        exit 74
+    fi
+fi
+if ! mv -f -- "$runtime_tui_tmp" "$runtime_tui"; then
+    rm -f -- "$runtime_tui_tmp"
+    echo "buzz-openconfig-acp: failed to install Buzz TUI config: $runtime_tui" >&2
+    exit 74
+fi
 # OpenCode also initializes its conventional XDG config path even when
 # OPENCODE_CONFIG_DIR is set. Point both paths at the same isolated directory;
 # otherwise ~/.config/opencode may still resolve to the pinned source checkout
@@ -83,9 +127,9 @@ if [[ -r "$openconfig_env" ]]; then
     oc_telemetry_off
 fi
 
-# Buzz presents public Disney names. The canonical OpenConfig paths stay
-# untouched for compatibility with upstream updates, while the generated
-# OpenCode primary agent and injected prompts use the public identity only.
+# Buzz uses the canonical OpenConfig identity directly. Keeping the same slug
+# and vocabulary across prompts, logs, teams, and upstream updates avoids a
+# translation layer that can drift after a rebuild.
 if [[ ! "$agent_name" =~ ^[a-z][a-z0-9-]{0,63}$ ]]; then
     echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_AGENT_NAME must be a lowercase slug" >&2
     exit 64
@@ -94,27 +138,6 @@ if [[ -n "$variant" && ! "$variant" =~ ^(low|medium|high|max)$ ]]; then
     echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_VARIANT must be low, medium, high, max, or empty" >&2
     exit 64
 fi
-
-rewrite_public_identity() {
-    perl -CSDA -pe '
-        use utf8;
-        s/\bContent-Aware Research\b/Basil/g;
-        s/\bMultimodal Looker\b/Rapunzel/g;
-        s/\bSisyphus Junior\b/Mushu/g;
-        s/\bJiminy Cricket\b/Jiminy Cricket/g;
-        s/\bPrometheus\b/Jiminy Cricket/g;
-        s/\bHephaestus\b/Hercules/g;
-        s/\bSisyphus\b/Merlin/g;
-        s/\bBug Hunt\b/Lumi\x{00E8}re/g;
-        s/\bOracle\b/Hades/g;
-        s/\bGenie\b/Merlin/g;
-        s/\bAtlas\b/Tarzan/g;
-        s/\bExplore\b/Moana/g;
-        s/\bLibrarian\b/Belle/g;
-        s/\bMetis\b/Mulan/g;
-        s/\bMomus\b/Yzma/g;
-    '
-}
 
 if [[ -z "$prompt_file" ]]; then
     echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE is required" >&2
@@ -138,11 +161,6 @@ if [[ ! -x "$opencode_bin" ]]; then
     echo "buzz-openconfig-acp: OpenCode binary is not executable: $opencode_bin" >&2
     exit 69
 fi
-if ! command -v jq >/dev/null 2>&1; then
-    echo "buzz-openconfig-acp: jq is required" >&2
-    exit 69
-fi
-
 base_config="${OPENCODE_CONFIG_CONTENT-}"
 if [[ -z "$base_config" ]]; then
     base_config="{}"
@@ -152,7 +170,7 @@ if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$base_config"; then
     exit 65
 fi
 
-persona_prompt="$(rewrite_public_identity < "$prompt_file")"
+persona_prompt="$(< "$prompt_file")"
 if [[ -n "$engine_prompt_file" ]]; then
     if [[ ! -f "$engine_prompt_file" || ! -r "$engine_prompt_file" ]]; then
         echo "buzz-openconfig-acp: engine prompt is not readable: $engine_prompt_file" >&2
@@ -166,7 +184,7 @@ if [[ -n "$engine_prompt_file" ]]; then
             exit 64
             ;;
     esac
-    engine_prompt="$(rewrite_public_identity < "$engine_prompt_file")"
+    engine_prompt="$(< "$engine_prompt_file")"
     persona_prompt="$persona_prompt
 
 ## OpenConfig execution profile
@@ -178,26 +196,33 @@ that role:
 $engine_prompt"
 fi
 
-# An ACP text response is retained inside OpenCode but is not automatically
-# published back to a Buzz channel.  Keep this delivery contract in the shared
-# adapter rather than duplicating it across every public persona prompt.
-# The inbound event context supplies the exact channel UUID and event ID.
+# Keep the delivery contract in the shared adapter rather than duplicating it
+# across every public persona prompt. buzz-acp captures the ordinary ACP final
+# response and publishes it into the originating Buzz conversation. Explicit
+# CLI sends remain available for delegations and additional intentional posts.
 persona_prompt="$persona_prompt
 
 ## Buzz delivery contract
 
-Your OpenCode final text is not itself a Buzz channel message. When an inbound
-Buzz event requires a response, publish exactly one final response with the
-Buzz CLI, using the channel UUID and event ID from the event context:
+Return the complete answer as your ordinary OpenCode final response. The Buzz
+harness publishes that final response into the originating channel or direct
+message, preserving its thread topology, when no successful explicit main
+response has already been published.
+
+Use the Buzz CLI only when the task requires an additional intentional post,
+such as delegating to another persona, posting outside the originating
+conversation, or broadcasting. When you deliberately use the CLI for the main
+response, publish the complete response exactly once using the channel UUID
+and event ID from the event context:
 
 buzz messages send --channel <channel-uuid> --reply-to <event-id> --content -
 
-Write the final response to that command's standard input. Do not rely on the
-ACP final-text surface to deliver it. Replying in the specified Buzz thread is
-always allowed even when the task is otherwise read-only; do not make any other
-system, repository, configuration, membership, or deployment change unless the
-request explicitly authorizes it. Do not publish progress chatter or duplicate
-the final response."
+Write that response to the command's standard input. A confirmed successful
+main-response send suppresses the harness fallback, so do not repeat it in a
+second post. Replying in the originating Buzz conversation is always allowed
+even when the task is otherwise read-only; do not make any other system,
+repository, configuration, membership, or deployment change unless the request
+explicitly authorizes it. Do not publish progress chatter."
 opencode_config_content="$(
     jq -cn \
         --argjson base "$base_config" \

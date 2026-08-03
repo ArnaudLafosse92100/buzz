@@ -11,9 +11,8 @@
  *   BUZZ_LOCAL_AUTOMATION_URL    defaults to http://127.0.0.1:43121
  */
 
-import { readFile, realpath } from "node:fs/promises";
-import path from "node:path";
-import { openConfigRoles, personaRoot } from "./lib/buzz-openconfig-manifest.mjs";
+import { openConfigRoles } from "./lib/buzz-openconfig-manifest.mjs";
+import { installPersonaPrompt } from "./lib/buzz-openconfig-persona-prompts.mjs";
 
 const baseUrl = (process.env.BUZZ_LOCAL_AUTOMATION_URL ?? "http://127.0.0.1:43121").replace(/\/$/, "");
 const token = process.env.BUZZ_LOCAL_AUTOMATION_TOKEN;
@@ -21,8 +20,7 @@ if (!token || token.length < 32) {
   throw new Error("BUZZ_LOCAL_AUTOMATION_TOKEN must contain the local API bearer token");
 }
 
-const promptRoot = await realpath(personaRoot);
-const expectedRoster = new Map(openConfigRoles.map((role) => [role.enginePath, role.name]));
+const expectedRoster = new Map(openConfigRoles.map((role) => [role.enginePath, role]));
 
 async function request(pathname, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
@@ -80,13 +78,6 @@ function updatePayload(persona, systemPrompt) {
   return body;
 }
 
-function assertManagedPromptPath(promptFile, name) {
-  const relative = path.relative(promptRoot, promptFile);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative) || !relative.endsWith(".md")) {
-    throw new Error(`${name}: persona prompt must resolve under ${promptRoot}`);
-  }
-}
-
 const health = await request("/v1/health");
 if (health.status !== "ok") throw new Error("Buzz local automation health check did not return ok");
 
@@ -103,14 +94,15 @@ for (const persona of managed) {
   const engine = persona.env_vars.BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE;
   if (seenEngines.has(engine)) throw new Error(`duplicate managed persona for ${engine}`);
   seenEngines.add(engine);
-  const expectedName = expectedRoster.get(engine);
+  const role = expectedRoster.get(engine);
+  const expectedName = role.name;
   if (persona.display_name !== expectedName) {
     throw new Error(`${engine}: expected public name ${expectedName}, found ${persona.display_name}`);
   }
-
-  const promptPath = await realpath(persona.env_vars?.BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE ?? "");
-  assertManagedPromptPath(promptPath, expectedName);
-  const systemPrompt = await readFile(promptPath, "utf8");
+  if (persona.env_vars?.BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE !== role.personaPath) {
+    throw new Error(`${expectedName}: runtime prompt path drifted from the canonical manifest`);
+  }
+  const systemPrompt = await installPersonaPrompt(role);
   if (!systemPrompt.includes("## Collaboration mesh") || !systemPrompt.includes("ACTION OWNER")) {
     throw new Error(`${expectedName}: source prompt is missing the required collaboration mesh`);
   }

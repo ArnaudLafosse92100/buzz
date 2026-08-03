@@ -6,40 +6,40 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { openConfigRoleByName, personaRoot } from "./lib/buzz-openconfig-manifest.mjs";
+import { openConfigRoleByName } from "./lib/buzz-openconfig-manifest.mjs";
 
 const expectedHandoffs = new Map([
-  ["Merlin", ["Hercules", "Mushu", "Moana", "Belle", "Basil", "Rapunzel", "Jiminy Cricket", "Mulan", "Tarzan", "Hades", "Lumière", "Yzma"]],
-  ["Hercules", ["Merlin", "Mulan", "Moana", "Belle", "Basil", "Rapunzel", "Hades", "Lumière"]],
-  ["Hades", ["Merlin", "Mulan", "Basil", "Rapunzel", "Lumière"]],
-  ["Lumière", ["Hades", "Rapunzel", "Merlin", "Hercules", "Tarzan", "Mushu"]],
-  ["Mushu", ["Merlin", "Mulan", "Hercules", "Moana", "Belle", "Hades", "Lumière"]],
-  ["Jiminy Cricket", ["Merlin", "Moana", "Belle", "Basil", "Rapunzel", "Mulan", "Hercules", "Tarzan", "Mushu"]],
-  ["Tarzan", ["Merlin", "Mulan", "Moana", "Belle", "Hercules", "Hades", "Lumière"]],
-  ["Moana", ["Merlin", "Jiminy Cricket", "Mulan", "Basil", "Belle", "Rapunzel", "Lumière"]],
-  ["Belle", ["Merlin", "Jiminy Cricket", "Mulan", "Moana", "Basil"]],
-  ["Rapunzel", ["Merlin", "Jiminy Cricket", "Mulan", "Moana", "Lumière", "Hades"]],
-  ["Mulan", ["Merlin", "Jiminy Cricket", "Moana", "Belle", "Basil", "Rapunzel", "Hercules", "Tarzan", "Mushu", "Hades", "Lumière", "Yzma"]],
-  ["Yzma", ["Merlin", "Mulan", "Hades", "Rapunzel"]],
-  ["Basil", ["Merlin", "Moana", "Belle", "Rapunzel", "Mulan"]],
+  ["Sisyphus", ["Hephaestus", "Sisyphus Junior", "Explore", "Librarian", "Content-Aware Research", "Multimodal Looker", "Prometheus", "Metis", "Atlas", "Oracle", "Bug Hunt", "Momus"]],
+  ["Hephaestus", ["Sisyphus", "Metis", "Explore", "Librarian", "Content-Aware Research", "Multimodal Looker", "Oracle", "Bug Hunt"]],
+  ["Oracle", ["Sisyphus", "Metis", "Content-Aware Research", "Multimodal Looker", "Bug Hunt"]],
+  ["Bug Hunt", ["Oracle", "Multimodal Looker", "Sisyphus", "Hephaestus", "Atlas", "Sisyphus Junior"]],
+  ["Sisyphus Junior", ["Sisyphus", "Metis", "Hephaestus", "Explore", "Librarian", "Oracle", "Bug Hunt"]],
+  ["Prometheus", ["Sisyphus", "Explore", "Librarian", "Content-Aware Research", "Multimodal Looker", "Metis", "Hephaestus", "Atlas", "Sisyphus Junior"]],
+  ["Atlas", ["Sisyphus", "Prometheus", "Explore", "Librarian", "Hephaestus", "Oracle", "Bug Hunt"]],
+  ["Explore", ["Sisyphus", "Prometheus", "Metis", "Content-Aware Research", "Librarian", "Multimodal Looker", "Bug Hunt"]],
+  ["Librarian", ["Sisyphus", "Prometheus", "Metis", "Explore", "Content-Aware Research"]],
+  ["Multimodal Looker", ["Sisyphus", "Prometheus", "Metis", "Explore", "Bug Hunt", "Oracle"]],
+  ["Metis", ["Sisyphus", "Prometheus", "Explore", "Librarian", "Content-Aware Research", "Multimodal Looker", "Momus"]],
+  ["Momus", ["Sisyphus", "Prometheus"]],
+  ["Content-Aware Research", ["Sisyphus", "Explore", "Librarian", "Multimodal Looker", "Metis"]],
 ]);
 
-const legacyNames = /\b(Genie|Prometheus|Atlas|Explore|Librarian|Multimodal Looker|Metis|Momus|Content-Aware Research|Sisyphus Junior|Hephaestus|Sisyphus|Bug Hunt|Oracle)\b/;
+const removedDisneyNames = /\b(Genie|Merlin|Hercules|Hades|Mushu|Jiminy Cricket|Tarzan|Moana|Belle|Rapunzel|Mulan|Yzma|Basil)\b|Lumière/;
 const violations = [];
 
 for (const [roleName, names] of expectedHandoffs) {
-  const filename = openConfigRoleByName.get(roleName)?.persona;
-  if (!filename) {
+  const role = openConfigRoleByName.get(roleName);
+  if (!role) {
     violations.push(`${roleName}: missing from canonical manifest`);
     continue;
   }
-  const contents = await readFile(`${personaRoot}/${filename}`, "utf8");
-  if (!contents.includes("## Collaboration mesh")) violations.push(`${filename}: missing collaboration mesh heading`);
-  if (!contents.includes("ACTION OWNER")) violations.push(`${filename}: missing next-owner contract`);
+  const contents = await readFile(role.personaSource, "utf8");
+  if (!contents.includes("## Collaboration mesh")) violations.push(`${role.personaSource}: missing collaboration mesh heading`);
+  if (!contents.includes("ACTION OWNER")) violations.push(`${role.personaSource}: missing next-owner contract`);
   for (const name of names) {
-    if (!contents.includes(`@${name}`)) violations.push(`${filename}: missing @${name} handoff`);
+    if (!contents.includes(`@${name}`)) violations.push(`${role.personaSource}: missing @${name} handoff`);
   }
-  if (legacyNames.test(contents)) violations.push(`${filename}: legacy public role leaked into prompt`);
+  if (removedDisneyNames.test(contents)) violations.push(`${role.personaSource}: removed Disney identity leaked into prompt`);
 }
 
 if (violations.length > 0) {

@@ -6,7 +6,6 @@ import {
   openConfigRoles,
   openConfigTeams,
   openConfigRoleByName,
-  publicIdentityReplacements,
 } from "./lib/buzz-openconfig-manifest.mjs";
 
 const failures = [];
@@ -28,17 +27,52 @@ for (const [label, values] of [
 const allowedVariants = new Set([null, "low", "medium", "high", "max"]);
 for (const role of openConfigRoles) {
   if (!allowedVariants.has(role.variant)) failures.push(`${role.name}: invalid variant ${role.variant}`);
+  if (role.model.includes("deepseek-v4-pro")) failures.push(`${role.name}: retired DeepSeek V4 Pro route reintroduced`);
   if (role.acpPort < 1024 || role.acpPort > 65535) failures.push(`${role.name}: invalid ACP port`);
-  for (const file of [role.enginePath, role.personaPath]) {
+  for (const file of [role.enginePath, role.personaSource]) {
     await access(file).catch(() => failures.push(`${role.name}: missing ${file}`));
   }
 }
 
-const legacyNames = publicIdentityReplacements.map(([name]) => name);
-for (const removed of ["Fizz", "Honey", "Bumble", "Welcome Team", "Forge Coding Team"]) {
+const expectedRoles = [
+  "Sisyphus",
+  "Hephaestus",
+  "Oracle",
+  "Sisyphus Junior",
+  "Bug Hunt",
+  "Prometheus",
+  "Atlas",
+  "Explore",
+  "Librarian",
+  "Multimodal Looker",
+  "Metis",
+  "Momus",
+  "Content-Aware Research",
+];
+const expectedTeams = [
+  "content-aware-audit",
+  "debug-team",
+  "docs-team",
+  "explorers",
+  "refactor-team",
+  "review-panel",
+  "ship-feature",
+];
+if (JSON.stringify(openConfigRoles.map((role) => role.name)) !== JSON.stringify(expectedRoles)) {
+  failures.push("public roster is not the canonical OpenConfig roster");
+}
+if (JSON.stringify(openConfigTeams.map((team) => team.name)) !== JSON.stringify(expectedTeams)) {
+  failures.push("team roster is not the canonical OpenConfig roster");
+}
+
+const removedDisneyNames = [
+  "Merlin", "Hercules", "Hades", "Mushu", "Lumière", "Jiminy Cricket",
+  "Tarzan", "Moana", "Belle", "Rapunzel", "Mulan", "Yzma", "Basil", "Genie",
+];
+for (const removed of [...removedDisneyNames, "Fizz", "Honey", "Bumble", "Welcome Team", "Forge Coding Team"]) {
   if (openConfigRoles.some((role) => role.name === removed)
     || openConfigTeams.some((team) => team.name === removed)) {
-    failures.push(`removed starter identity leaked into manifest: ${removed}`);
+    failures.push(`removed identity leaked into manifest: ${removed}`);
   }
 }
 for (const team of openConfigTeams) {
@@ -52,18 +86,18 @@ for (const team of openConfigTeams) {
       failures.push(`${team.name}: references non-member ${role.name}`);
     }
   }
-  for (const legacy of legacyNames) {
-    if (teamText.includes(legacy)) failures.push(`${team.name}: leaks legacy identity ${legacy}`);
+  for (const removed of removedDisneyNames) {
+    if (teamText.includes(removed)) failures.push(`${team.name}: leaks removed Disney identity ${removed}`);
   }
 }
 
-const ship = openConfigTeams.find((team) => team.name === "Ship Feature");
-const refactor = openConfigTeams.find((team) => team.name === "Refactor Team");
-if (JSON.stringify(ship?.members) !== JSON.stringify(["Merlin", "Hercules", "Mushu", "Hades", "Lumière"])) {
-  failures.push("Ship Feature roster is not the canonical five-stage pipeline");
+const ship = openConfigTeams.find((team) => team.name === "ship-feature");
+const refactor = openConfigTeams.find((team) => team.name === "refactor-team");
+if (JSON.stringify(ship?.members) !== JSON.stringify(["Sisyphus", "Hephaestus", "Sisyphus Junior", "Bug Hunt"])) {
+  failures.push("ship-feature roster is not the canonical OpenConfig pipeline");
 }
-if (JSON.stringify(refactor?.members) !== JSON.stringify(["Merlin", "Mulan", "Tarzan", "Hades", "Lumière"])) {
-  failures.push("Refactor Team roster is not the canonical plan/implement/review/verify pipeline");
+if (JSON.stringify(refactor?.members) !== JSON.stringify(["Sisyphus", "Metis", "Atlas", "Oracle", "Bug Hunt"])) {
+  failures.push("refactor-team roster is not the canonical critique/execute/advise/verify pipeline");
 }
 
 const upstream = JSON.parse(await readFile("/Volumes/PERSO/OpenConfig/oh-my-openagent.json", "utf8"));

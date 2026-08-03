@@ -21,6 +21,7 @@ adapter_source="$repo_root/scripts/buzz-openconfig-acp.sh"
 adapter_install="${BUZZ_OPENCONFIG_ADAPTER_PATH:-$HOME/.local/bin/buzz-openconfig-acp}"
 harness_file="$custom_harness_dir/buzz-openconfig.json"
 manifest_module="$repo_root/scripts/lib/buzz-openconfig-manifest.mjs"
+legacy_identity_module="$repo_root/scripts/lib/buzz-openconfig-legacy-identities.mjs"
 
 die() {
     echo "migrate-buzz-hermes-to-openconfig: $*" >&2
@@ -36,6 +37,14 @@ manifest_json() {
       import { pathToFileURL } from "node:url";
       const { openConfigRoles } = await import(pathToFileURL(process.env.MANIFEST_MODULE));
       process.stdout.write(JSON.stringify(openConfigRoles));
+    '
+}
+
+legacy_identity_json() {
+    LEGACY_IDENTITY_MODULE="$legacy_identity_module" node --input-type=module -e '
+      import { pathToFileURL } from "node:url";
+      const { legacyIdentityMap } = await import(pathToFileURL(process.env.LEGACY_IDENTITY_MODULE));
+      process.stdout.write(JSON.stringify(legacyIdentityMap));
     '
 }
 
@@ -78,6 +87,7 @@ check_state() {
     require_file "$adapter_source"
     require_file "$buzz_omo_source"
     require_file "$manifest_module"
+    require_file "$legacy_identity_module"
     jq -e . "$agents_store" >/dev/null
     jq -e . "$global_config" >/dev/null
 
@@ -130,6 +140,7 @@ apply_migration() {
     require_file "$adapter_source"
     require_file "$buzz_omo_source"
     require_file "$manifest_module"
+    require_file "$legacy_identity_module"
     command -v jq >/dev/null 2>&1 || die "jq is required"
     command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is required"
 
@@ -166,9 +177,10 @@ apply_migration() {
     chmod 600 "$harness_tmp"
     mv "$harness_tmp" "$harness_file"
 
-    local targets_json roles_json
+    local targets_json roles_json legacy_identities_json
     targets_json="$(active_target_ids | jq -Rsc 'split("\n") | map(select(length > 0))')"
     roles_json="$(manifest_json)"
+    legacy_identities_json="$(legacy_identity_json)"
     [[ "$(jq 'length' <<<"$targets_json")" -gt 0 ]] || die "no active Hermes-backed personas found"
 
     local definition id name prompt_file profile_slug db archive_dir
@@ -213,7 +225,7 @@ apply_migration() {
           | $targets
           | index($target_id)
         ) then
-          (if .name == "Genie" then "Merlin" else .name end) as $role_name
+          ($aliases[.name] // .name) as $role_name
           | ($roles[] | select(.name == $role_name)) as $role
           | .name = $role.name
           | if .pubkey == "" then
@@ -239,7 +251,7 @@ apply_migration() {
         else .
         end
       )
-    ' --argjson targets "$targets_json" --argjson roles "$roles_json" --arg persona_root "$persona_root" --arg adapter "$adapter_install"
+    ' --argjson targets "$targets_json" --argjson roles "$roles_json" --argjson aliases "$legacy_identities_json" --arg persona_root "$persona_root" --arg adapter "$adapter_install"
 
     atomic_jq "$global_config" '.preferred_runtime = "buzz-openconfig"'
 

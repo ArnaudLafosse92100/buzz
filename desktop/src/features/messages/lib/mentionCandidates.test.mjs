@@ -174,45 +174,55 @@ test("teams with identity and persona display-name collisions are not suggested"
 
 test("plain pasted @agent tokens resolve to their managed-agent pubkeys", () => {
   assert.deepEqual(
-    resolvePastedAgentMentions("@Moana and @Basil: inspect this.", [
-      {
-        kind: "identity",
-        displayName: "Moana",
-        pubkey: "a".repeat(64),
-        isAgent: true,
-        isMember: false,
-      },
-      {
-        kind: "identity",
-        displayName: "Basil",
-        pubkey: "b".repeat(64),
-        isAgent: true,
-        isMember: true,
-      },
-    ]),
+    resolvePastedAgentMentions(
+      "@Explore and @Content-Aware Research: inspect this.",
+      [
+        {
+          kind: "identity",
+          displayName: "Explore",
+          pubkey: "a".repeat(64),
+          isAgent: true,
+          isMember: false,
+        },
+        {
+          kind: "identity",
+          displayName: "Content-Aware Research",
+          pubkey: "b".repeat(64),
+          isAgent: true,
+          isMember: true,
+        },
+      ],
+    ),
     [
-      { kind: "pubkey", displayName: "Moana", pubkey: "a".repeat(64) },
-      { kind: "pubkey", displayName: "Basil", pubkey: "b".repeat(64) },
+      { kind: "pubkey", displayName: "Explore", pubkey: "a".repeat(64) },
+      {
+        kind: "pubkey",
+        displayName: "Content-Aware Research",
+        pubkey: "b".repeat(64),
+      },
     ],
   );
 });
 
 test("plain pasted @persona tokens preserve persona provisioning", () => {
   assert.deepEqual(
-    resolvePastedAgentMentions("Please ask @Rapunzel to inspect the image.", [
-      {
-        kind: "persona",
-        displayName: "Rapunzel",
-        personaId: "rapunzel-persona",
-        isAgent: true,
-        isMember: false,
-      },
-    ]),
+    resolvePastedAgentMentions(
+      "Please ask @Multimodal Looker to inspect the image.",
+      [
+        {
+          kind: "persona",
+          displayName: "Multimodal Looker",
+          personaId: "multimodal-looker-persona",
+          isAgent: true,
+          isMember: false,
+        },
+      ],
+    ),
     [
       {
         kind: "persona",
-        displayName: "Rapunzel",
-        personaId: "rapunzel-persona",
+        displayName: "Multimodal Looker",
+        personaId: "multimodal-looker-persona",
       },
     ],
   );
@@ -222,7 +232,7 @@ test("pasted agent resolution rejects people, email addresses, code, and ambigui
   const candidates = [
     {
       kind: "identity",
-      displayName: "Moana",
+      displayName: "Explore",
       pubkey: "a".repeat(64),
       isAgent: true,
       isMember: false,
@@ -252,7 +262,7 @@ test("pasted agent resolution rejects people, email addresses, code, and ambigui
 
   assert.deepEqual(
     resolvePastedAgentMentions(
-      "arnaud@Moana.example `@Moana` @Arnaud @Duplicate",
+      "arnaud@Explore.example `@Explore` @Arnaud @Duplicate",
       candidates,
     ),
     [],
