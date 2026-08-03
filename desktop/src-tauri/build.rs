@@ -106,7 +106,13 @@ fn main() {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    if updater_public_key.is_some() && updater_endpoint.is_some() {
+    let local_file_secrets = std::env::var_os("CARGO_FEATURE_LOCAL_FILE_SECRETS").is_some();
+    if local_file_secrets && (updater_public_key.is_some() || updater_endpoint.is_some()) {
+        println!(
+            "cargo:warning=local-file-secrets disables Buzz auto-updates; use just desktop-rebuild-install-local-macos"
+        );
+    }
+    if !local_file_secrets && updater_public_key.is_some() && updater_endpoint.is_some() {
         println!("cargo:rustc-cfg=buzz_updater_enabled");
     }
 

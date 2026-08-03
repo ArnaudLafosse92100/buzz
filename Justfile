@@ -246,14 +246,29 @@ desktop-release-build target="aarch64-apple-darwin":
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
     pnpm install
-    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+    # Local installation consumes only the macOS app bundle. Building a DMG
+    # here adds a second packaging step that can fail after Buzz.app is already
+    # valid, leaving callers tempted to install an ambiguous stale bundle.
+    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm,local-file-secrets --target {{target}} --bundles app
 
 # Sign and install the locally built macOS app with a stable local identity.
+# Local builds use an owner-only secret blob because self-signed apps have no
+# Team ID and would otherwise prompt after every new cdhash.
 # Run once with `--create-identity` if this machine has no code-signing identity.
 desktop-install-local-macos *ARGS:
     ./desktop/scripts/install-local-macos-app.sh {{ARGS}}
 
-# Verify the installed macOS app has a stable Keychain-friendly signature.
+# Canonical local deployment: build the exact target-specific app bundle, then
+# install that same target only if the build completed successfully. The
+# installer also rejects bundles missing the local-file-secrets build marker,
+# so future recipe drift cannot reintroduce the recurring Keychain prompt.
+desktop-rebuild-install-local-macos target="aarch64-apple-darwin" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just desktop-release-build {{target}}
+    BUZZ_DESKTOP_BUILD_TARGET={{target}} ./desktop/scripts/install-local-macos-app.sh {{ARGS}}
+
+# Verify the installed app signature and owner-only local secret store.
 desktop-signing-status:
     ./desktop/scripts/install-local-macos-app.sh --status
 

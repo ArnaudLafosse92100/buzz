@@ -1,15 +1,17 @@
 //! OS keyring access for desktop nsec private keys.
 //!
-//! All secrets are stored as a single JSON blob under one keychain entry
-//! (service = the store's service name, username = `"secrets"`). This means
-//! exactly one OS prompt per process lifetime regardless of how many keys are
-//! stored — the same pattern used by Goose.
+//! All secrets are stored as a single JSON blob. The normal backend keeps it
+//! under one keychain entry (service = the store's service name, username =
+//! `"secrets"`); the custom local macOS backend keeps the same bytes in an
+//! owner-only file.
 //!
 //! The chosen backend is selected at compile time by the per-target feature in
-//! `Cargo.toml`. On macOS the legacy `keyring` crate (SecKeychain API) is used
-//! for the blob entry so that signed release builds and unsigned dev builds
-//! share the same store. DPK (Data Protection Keychain) is used only by the
-//! one-time migration path that reads old per-key entries written by #1264.
+//! `Cargo.toml`. Ordinary macOS builds use the legacy `keyring` crate
+//! (SecKeychain API). Custom local builds enable `local-file-secrets`: they
+//! import that blob once, then use an owner-only file because a locally signed
+//! app has no Apple Team ID and receives a new Keychain cdhash on every build.
+//! DPK (Data Protection Keychain) is used only by the one-time migration path
+//! that reads old per-key entries written by #1264.
 //! Windows and Linux use the `keyring` crate directly. The `system-keyring`
 //! feature gates the whole store; when it is off, [`SecretStore`] is unusable
 //! and callers fall back to their own `0o600` file storage.
@@ -23,6 +25,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+#[cfg(any(debug_assertions, test))]
+mod debug;
+
+#[cfg(all(feature = "local-file-secrets", target_os = "macos"))]
+mod local_file;
 
 /// Result of probing the keyring before a migration: distinguishes "reachable
 /// but holds no entry" (safe to migrate into) from "unreachable this boot"
@@ -266,15 +274,27 @@ fn keyring_entry(service: &str, key: &str) -> Result<keyring::Entry, keyring::Er
 }
 
 // macOS-specific imports for the Data Protection Keychain backend.
-#[cfg(all(feature = "system-keyring", target_os = "macos"))]
+#[cfg(all(
+    feature = "system-keyring",
+    target_os = "macos",
+    any(not(feature = "local-file-secrets"), test)
+))]
 use security_framework::base::Error as SFError;
-#[cfg(all(feature = "system-keyring", target_os = "macos"))]
+#[cfg(all(
+    feature = "system-keyring",
+    target_os = "macos",
+    not(feature = "local-file-secrets")
+))]
 use security_framework::passwords::{
     delete_generic_password_options, generic_password, PasswordOptions,
 };
 
 /// Returns true when the security-framework error is "item not found" (-25300).
-#[cfg(all(feature = "system-keyring", target_os = "macos"))]
+#[cfg(all(
+    feature = "system-keyring",
+    target_os = "macos",
+    any(not(feature = "local-file-secrets"), test)
+))]
 fn is_not_found(e: &SFError) -> bool {
     e.code() == -25300
 }
@@ -284,13 +304,21 @@ fn is_not_found(e: &SFError) -> bool {
 /// dev builds (`tauri dev` / `cargo run`). The caller should fall back to the
 /// legacy `keyring` crate path, which uses the old-style keychain and does not
 /// require hardened-runtime entitlements.
-#[cfg(all(feature = "system-keyring", target_os = "macos"))]
+#[cfg(all(
+    feature = "system-keyring",
+    target_os = "macos",
+    any(not(feature = "local-file-secrets"), test)
+))]
 fn is_dpk_unavailable(e: &SFError) -> bool {
     e.code() == -34018
 }
 
 /// Build a `PasswordOptions` for the Data Protection Keychain.
-#[cfg(all(feature = "system-keyring", target_os = "macos"))]
+#[cfg(all(
+    feature = "system-keyring",
+    target_os = "macos",
+    not(feature = "local-file-secrets")
+))]
 fn dpk_opts(service: &str, key: &str) -> PasswordOptions {
     let mut opts = PasswordOptions::new_generic_password(service, key);
     opts.use_protected_keychain();
@@ -334,12 +362,17 @@ impl SecretStore {
         Ok(Some(map))
     }
 
-    /// Read the raw blob bytes from the keychain. `Ok(None)` = not found.
+    /// Read the raw blob bytes from the active backend. `Ok(None)` = not found.
     ///
-    /// Always uses the legacy keyring crate on macOS so that signed and
-    /// unsigned (dev) builds share the same store. DPK is only used by
-    /// `migrate_legacy_key` to read old per-key entries written by #1264.
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    /// The custom local macOS build reads its owner-only file, importing the
+    /// legacy Keychain blob once when the file does not exist. Ordinary macOS
+    /// builds keep using the legacy keyring crate. DPK is only used by
+    /// `migrate_legacy_key` in ordinary builds.
+    #[cfg(all(
+        feature = "system-keyring",
+        target_os = "macos",
+        not(feature = "local-file-secrets")
+    ))]
     fn read_blob_raw(&self) -> Result<Option<Vec<u8>>, String> {
         self.read_blob_raw_keyring()
     }
@@ -396,17 +429,8 @@ impl SecretStore {
     where
         F: FnOnce(&mut HashMap<String, String>),
     {
-        // Acquire the interprocess advisory lock first. All Buzz processes
-        // using the same service name contend on the same lockfile at
-        // /tmp/buzz-keychain-<uid>-<service>.lock (a deterministic per-user
-        // path invariant to $TMPDIR), so only one process performs a
-        // read-modify-write at a time.
         let _lock = acquire_blob_lock(&self.service)?;
 
-        // Always do a fresh read from the keychain while holding the lock —
-        // this is the critical correction over the prior warm-cache path. A
-        // stale warm cache would make us build our candidate on an outdated
-        // baseline and drop keys written by another process.
         let raw = self.read_blob_raw()?;
         let current: HashMap<String, String> = match raw {
             None => HashMap::new(),
@@ -417,26 +441,18 @@ impl SecretStore {
             }
         };
 
-        // Build the candidate state in a separate allocation so that a write
-        // failure below cannot leave the cache ahead of durable storage.
         let mut next = current.clone();
         f(&mut next);
 
-        // Skip the keychain write when the candidate equals the freshly-read
-        // durable state — no I/O needed and no keychain ACL prompt on macOS.
         if next == current {
-            // Update the cache to the fresh read even on no-op so subsequent
-            // reads in this process see any keys another process may have added.
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(current);
             return Ok(());
         }
 
-        // Write to keyring while still holding the file lock.
         let json = serde_json::to_string(&next).map_err(|e| format!("blob serialize: {e}"))?;
         match self.write_blob_raw(json.as_bytes()) {
             Ok(()) => {
-                // Advance the cache to `next` only after the durable write succeeds.
                 let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some(next);
                 Ok(())
@@ -451,8 +467,12 @@ impl SecretStore {
         }
     }
 
-    /// Always uses the legacy keyring crate on macOS — see `read_blob_raw`.
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    /// Ordinary macOS releases keep using the legacy keyring crate.
+    #[cfg(all(
+        feature = "system-keyring",
+        target_os = "macos",
+        not(feature = "local-file-secrets")
+    ))]
     fn write_blob_raw(&self, bytes: &[u8]) -> Result<(), String> {
         self.write_blob_raw_keyring(bytes)
     }
@@ -462,7 +482,10 @@ impl SecretStore {
         self.write_blob_raw_keyring(bytes)
     }
 
-    #[cfg(feature = "system-keyring")]
+    #[cfg(all(
+        feature = "system-keyring",
+        not(all(feature = "local-file-secrets", target_os = "macos"))
+    ))]
     fn write_blob_raw_keyring(&self, bytes: &[u8]) -> Result<(), String> {
         let value = std::str::from_utf8(bytes).map_err(|e| format!("blob utf8 encode: {e}"))?;
         let entry =
@@ -503,7 +526,11 @@ impl SecretStore {
 
     /// Check old per-key DPK/keyring entries for `key`. Used by `probe()` when
     /// the blob doesn't exist yet (first launch after upgrade).
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    #[cfg(all(
+        feature = "system-keyring",
+        target_os = "macos",
+        not(feature = "local-file-secrets")
+    ))]
     fn probe_legacy_key(&self, key: &str) -> KeyringProbe {
         match generic_password(dpk_opts(&self.service, key)) {
             Ok(_) => KeyringProbe::Present,
@@ -521,7 +548,10 @@ impl SecretStore {
         self.probe_legacy_key_keyring(key)
     }
 
-    #[cfg(feature = "system-keyring")]
+    #[cfg(all(
+        feature = "system-keyring",
+        not(all(feature = "local-file-secrets", target_os = "macos"))
+    ))]
     fn probe_legacy_key_keyring(&self, key: &str) -> KeyringProbe {
         match keyring_entry(&self.service, key) {
             Ok(entry) => match entry.get_password() {
@@ -575,45 +605,6 @@ impl SecretStore {
         }
     }
 
-    /// Read the secret for `key` without any legacy-migration side effects.
-    ///
-    /// Read the entire blob without any legacy-migration side effects.
-    ///
-    /// Returns the full key→value map when a blob exists, `Ok(None)` when no
-    /// blob has been written yet, and `Err` only when the backend is
-    /// unavailable. Never calls `migrate_legacy_key`.
-    pub fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
-        #[cfg(feature = "system-keyring")]
-        {
-            self.load_blob()
-        }
-        #[cfg(not(feature = "system-keyring"))]
-        {
-            Err("system-keyring feature disabled".to_string())
-        }
-    }
-
-    /// Insert all entries from `entries` into the blob in a single mutation.
-    ///
-    /// Entries that already exist in the blob are overwritten; entries not
-    /// present in `entries` are left unchanged. If the resulting blob is
-    /// identical to what is already stored, no keychain write occurs.
-    pub fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
-        #[cfg(feature = "system-keyring")]
-        {
-            self.mutate_blob(|map| {
-                for (k, v) in entries {
-                    map.insert(k.clone(), v.clone());
-                }
-            })
-        }
-        #[cfg(not(feature = "system-keyring"))]
-        {
-            let _ = entries;
-            Err("system-keyring feature disabled".to_string())
-        }
-    }
-
     /// On first launch after upgrading from the per-key DPK format, read the
     /// old DPK entry for `key`, write it into a new blob, and delete the old
     /// item. Returns `Ok(None)` when no old entry exists.
@@ -622,7 +613,11 @@ impl SecretStore {
     /// #1267 (before the dev/release split was fixed). Anyone who ran main
     /// while #1267 was present has a DPK blob instead of per-key entries; this
     /// reads it, merges all keys into the legacy blob, and deletes the DPK blob.
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    #[cfg(all(
+        feature = "system-keyring",
+        target_os = "macos",
+        not(feature = "local-file-secrets")
+    ))]
     fn migrate_legacy_key(&self, key: &str) -> Result<Option<String>, String> {
         // One-time migration: check for a DPK blob (key = BLOB_KEY = "secrets")
         // written by #1267 before the dev/release split was fixed.
@@ -680,7 +675,10 @@ impl SecretStore {
 
     /// Check the old per-key `keyring` crate entry (pre-#1264 format) and
     /// migrate it into the blob if found.
-    #[cfg(feature = "system-keyring")]
+    #[cfg(all(
+        feature = "system-keyring",
+        not(all(feature = "local-file-secrets", target_os = "macos"))
+    ))]
     fn migrate_legacy_key_keyring(&self, key: &str) -> Result<Option<String>, String> {
         let entry = keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
         match entry.get_password() {
@@ -753,6 +751,7 @@ impl SecretStore {
     /// This is the correct wipe path for sign-out: the old `delete_all` skipped
     /// step 1–3 so stale per-key entries could be re-imported on the next launch
     /// via `migrate_legacy_key`. This method prevents that resurrection.
+    #[cfg(not(all(feature = "local-file-secrets", target_os = "macos")))]
     pub fn delete_all_with_legacy_cleanup(&self) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {
@@ -845,6 +844,7 @@ impl SecretStore {
     /// Returns `true` when all three shapes are absent (or inaccessible in an
     /// expected way), `false` when any entry is found or the keychain is
     /// unavailable (fail-closed).
+    #[cfg(not(all(feature = "local-file-secrets", target_os = "macos")))]
     pub fn verify_fully_wiped(&self) -> bool {
         #[cfg(feature = "system-keyring")]
         {
@@ -897,7 +897,7 @@ impl SecretStore {
         }
     }
 
-    /// Delete the secret for `key`. A missing entry is not an error.
+    #[cfg(not(all(feature = "local-file-secrets", target_os = "macos")))]
     pub fn delete(&self, key: &str) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {

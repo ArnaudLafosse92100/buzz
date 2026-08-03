@@ -22,6 +22,9 @@ mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:me
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
 system-keyring = ["dep:keyring"]
+# Local macOS builds keep the keyring linked for a one-time import, then use
+# owner-only local storage so rebuilding does not create a new ACL prompt.
+local-file-secrets = ["system-keyring"]
 
 [build-dependencies]
 base64 = "0.22"

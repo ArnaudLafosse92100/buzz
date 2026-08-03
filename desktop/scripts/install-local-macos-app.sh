@@ -4,10 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-APP_PATH="$DESKTOP_DIR/src-tauri/target/release/bundle/macos/Buzz.app"
+# `desktop-release-build` always passes an explicit Rust target to Tauri, so
+# its bundle lives under `target/<triple>/release`, not the legacy
+# `target/release` directory. Resolve the native triple by default and keep
+# `--app` available for deliberate cross-target installs.
+BUILD_TARGET="${BUZZ_DESKTOP_BUILD_TARGET:-}"
+APP_PATH=""
 INSTALL_PATH="${BUZZ_INSTALL_APP_PATH:-/Applications/Buzz.app}"
 ENTITLEMENTS_PATH="$DESKTOP_DIR/src-tauri/Entitlements.plist"
 IDENTITY_NAME="${BUZZ_LOCAL_CODESIGN_IDENTITY:-Buzz Local Code Signing}"
+LOCAL_SECRET_PATH="${BUZZ_LOCAL_SECRET_PATH:-${HOME}/Library/Application Support/xyz.block.buzz.app/secrets.local.json}"
+LOCAL_SECRET_BACKEND_MARKER="BUZZ_LOCAL_FILE_SECRETS_V1"
 KEYCHAIN_PATH="${BUZZ_CODESIGN_KEYCHAIN:-}"
 CREATE_IDENTITY=0
 NO_INSTALL=0
@@ -16,18 +23,32 @@ STATUS_ONLY=0
 SEARCH_LIST_CHANGED=0
 ORIGINAL_KEYCHAINS=""
 IDENTITY_TMPDIR=""
+INSTALL_STAGING_DIR=""
+INSTALL_STAGED_APP=""
+INSTALL_BACKUP_PATH=""
+INSTALL_SWAP_STARTED=0
+INSTALL_ACTIVATED=0
+REQUIRED_BUNDLED_EXECUTABLES=(
+  buzz-desktop
+  buzz-acp
+  buzz
+  buzz-agent
+  buzz-dev-mcp
+  git-credential-nostr
+)
 
 usage() {
   cat <<'USAGE'
 Usage: desktop/scripts/install-local-macos-app.sh [options]
 
 Signs a locally built Buzz.app with a stable local code-signing identity, then
-installs it to /Applications/Buzz.app. This keeps macOS Keychain ACLs stable
-across local rebuilds; ad-hoc signatures fall back to a cdhash requirement and
-make "Always Allow" prompts come back after each rebuild.
+installs it to /Applications/Buzz.app. Local builds use an owner-only secret
+blob after one Keychain import because self-signed apps have no Apple Team ID
+and receive a new Keychain cdhash on every rebuild.
 
 Options:
-  --app PATH             Buzz.app bundle to sign.
+  --app PATH             Buzz.app bundle to sign. Default: the native-target
+                         bundle produced by `just desktop-release-build`.
   --install-path PATH    Destination app path. Default: /Applications/Buzz.app
   --identity NAME        Code-signing identity common name.
                          Default: Buzz Local Code Signing
@@ -40,6 +61,7 @@ Options:
   -h, --help             Show this help.
 
 Examples:
+  just desktop-rebuild-install-local-macos
   just desktop-install-local-macos --create-identity
   just desktop-signing-status
   desktop/scripts/install-local-macos-app.sh --no-install --app /tmp/Buzz.app
@@ -124,6 +146,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Status/help do not need a Rust toolchain. Resolve the default build artifact
+# only for operations that actually sign an app and did not receive --app.
+if [[ "$STATUS_ONLY" != "1" && -z "$APP_PATH" ]]; then
+  if [[ -z "$BUILD_TARGET" ]]; then
+    command -v rustc >/dev/null 2>&1 || die "rustc not found; pass --app PATH explicitly"
+    BUILD_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+  fi
+  [[ -n "$BUILD_TARGET" ]] || die "could not resolve the native Rust target"
+  APP_PATH="$DESKTOP_DIR/src-tauri/target/$BUILD_TARGET/release/bundle/macos/Buzz.app"
+fi
+
 # `defaults read` treats a relative app bundle path as a preferences domain,
 # rather than an Info.plist path. Make an explicit --app path absolute before
 # inspecting or signing the bundle.
@@ -134,6 +167,7 @@ fi
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS is required"
 command -v codesign >/dev/null 2>&1 || die "codesign not found"
 command -v security >/dev/null 2>&1 || die "security not found"
+command -v strings >/dev/null 2>&1 || die "strings not found"
 if [[ "$STATUS_ONLY" != "1" ]]; then
   command -v openssl >/dev/null 2>&1 || die "openssl not found"
   command -v ditto >/dev/null 2>&1 || die "ditto not found"
@@ -194,6 +228,21 @@ ensure_keychain_in_search_list() {
 
 cleanup_on_exit() {
   local status=$?
+
+  if [[ -n "$INSTALL_STAGING_DIR" && -d "$INSTALL_STAGING_DIR" ]]; then
+    if [[ "$status" -ne 0 && "$INSTALL_SWAP_STARTED" == "1" ]]; then
+      if [[ -n "$INSTALL_BACKUP_PATH" && -e "$INSTALL_BACKUP_PATH" ]]; then
+        warn "Install did not verify; restoring previous app"
+        if [[ -e "$INSTALL_PATH" ]]; then
+          mv "$INSTALL_PATH" "$INSTALL_STAGING_DIR/Failed.app" || true
+        fi
+        mv "$INSTALL_BACKUP_PATH" "$INSTALL_PATH" || true
+      elif [[ "$INSTALL_ACTIVATED" == "1" && -e "$INSTALL_PATH" ]]; then
+        mv "$INSTALL_PATH" "$INSTALL_STAGING_DIR/Failed.app" || true
+      fi
+    fi
+    rm -rf -- "$INSTALL_STAGING_DIR" >/dev/null 2>&1 || true
+  fi
 
   if [[ -n "$IDENTITY_TMPDIR" && -d "$IDENTITY_TMPDIR" ]]; then
     chmod -R u+w "$IDENTITY_TMPDIR" >/dev/null 2>&1 || true
@@ -292,14 +341,36 @@ verify_signature() {
   printf '%s\n' "$requirement"
 
   if grep -Fq 'designated => cdhash' <<< "$requirement"; then
-    die "signature is still ad-hoc/cdhash based; Keychain prompts will not be stable"
+    die "signature is still ad-hoc/cdhash based; expected a certificate-backed local signature"
   fi
   if ! grep -Fq 'identifier "xyz.block.buzz.app"' <<< "$requirement"; then
     die "designated requirement does not include the Buzz bundle identifier"
   fi
   if ! grep -Fq 'certificate leaf = H' <<< "$requirement"; then
-    warn "designated requirement is not leaf-hash based; inspect before relying on Keychain ACL stability"
+    warn "designated requirement is not leaf-hash based; inspect the local signature provenance"
   fi
+}
+
+has_local_secret_backend() {
+  local app="$1"
+  local executable="$app/Contents/MacOS/buzz-desktop"
+
+  [[ -x "$executable" ]] || return 1
+  strings "$executable" | grep -F "$LOCAL_SECRET_BACKEND_MARKER" >/dev/null
+}
+
+verify_bundled_executables() {
+  local app="$1"
+  local executable
+
+  log "Verifying bundled executables in $app"
+  for executable in "${REQUIRED_BUNDLED_EXECUTABLES[@]}"; do
+    [[ -x "$app/Contents/MacOS/$executable" ]] ||
+      die "missing required bundled executable: $app/Contents/MacOS/$executable"
+  done
+
+  has_local_secret_backend "$app" ||
+    die "local Buzz bundle is missing the required local-file-secrets backend; rebuild with 'just desktop-release-build'"
 }
 
 print_status() {
@@ -307,6 +378,9 @@ print_status() {
   local bundle_id=""
   local requirement=""
   local leaf_hash=""
+  local bundled_executable
+  local bundled_executables_complete=1
+  local local_secret_mode=""
 
   printf 'install_path=%s\n' "$INSTALL_PATH"
   printf 'identity_name=%s\n' "$IDENTITY_NAME"
@@ -314,6 +388,26 @@ print_status() {
   if [[ ! -d "$INSTALL_PATH" ]]; then
     printf 'installed_app=missing\n'
     return 1
+  fi
+
+  for bundled_executable in "${REQUIRED_BUNDLED_EXECUTABLES[@]}"; do
+    if [[ ! -x "$INSTALL_PATH/Contents/MacOS/$bundled_executable" ]]; then
+      printf 'bundled_executable_%s=missing_or_not_executable\n' "$bundled_executable"
+      bundled_executables_complete=0
+    fi
+  done
+  if [[ "$bundled_executables_complete" == "1" ]]; then
+    printf 'bundled_executables=complete\n'
+  else
+    printf 'bundled_executables=incomplete\n'
+    exit_code=1
+  fi
+
+  if has_local_secret_backend "$INSTALL_PATH"; then
+    printf 'local_secret_backend=embedded\n'
+  else
+    printf 'local_secret_backend=missing\n'
+    exit_code=1
   fi
 
   bundle_id="$(defaults read "$INSTALL_PATH/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
@@ -336,13 +430,13 @@ print_status() {
   printf '%s\n' "$requirement"
 
   if grep -Fq 'designated => cdhash' <<< "$requirement"; then
-    printf 'keychain_acl_stability=bad_cdhash\n'
+    printf 'signature_requirement=bad_cdhash\n'
     exit_code=1
   elif grep -Fq 'identifier "xyz.block.buzz.app"' <<< "$requirement" &&
     grep -Fq 'certificate leaf = H' <<< "$requirement"; then
-    printf 'keychain_acl_stability=stable\n'
+    printf 'signature_requirement=certificate_leaf\n'
   else
-    printf 'keychain_acl_stability=unknown\n'
+    printf 'signature_requirement=unknown\n'
     exit_code=1
   fi
 
@@ -357,10 +451,20 @@ print_status() {
     exit_code=1
   fi
 
-  if security find-generic-password -s buzz-desktop >/dev/null 2>&1; then
-    printf 'buzz_desktop_keychain_item=present\n'
+  printf 'local_secret_path=%s\n' "$LOCAL_SECRET_PATH"
+  if [[ -f "$LOCAL_SECRET_PATH" ]]; then
+    local_secret_mode="$(stat -f '%Lp' "$LOCAL_SECRET_PATH" 2>/dev/null || true)"
+    printf 'local_secret_store=ready\n'
+    printf 'local_secret_permissions=%s\n' "${local_secret_mode:-unknown}"
+    if [[ "$local_secret_mode" != "600" ]]; then
+      exit_code=1
+    fi
+  elif security find-generic-password -s buzz-desktop >/dev/null 2>&1; then
+    printf 'local_secret_store=pending_keychain_import\n'
+    printf 'buzz_desktop_keychain_backup=present\n'
   else
-    printf 'buzz_desktop_keychain_item=missing\n'
+    printf 'local_secret_store=uninitialized\n'
+    printf 'buzz_desktop_keychain_backup=missing\n'
   fi
 
   if pgrep -f "$INSTALL_PATH/Contents/MacOS/buzz-desktop" >/dev/null 2>&1; then
@@ -395,35 +499,53 @@ wait_for_buzz_to_quit() {
 
 install_app() {
   local install_parent
-  local backup_path
   install_parent="$(dirname "$INSTALL_PATH")"
-  backup_path="$install_parent/Buzz.before-local-codesign-$(date +%Y%m%d-%H%M%S).app"
 
+  [[ "$INSTALL_PATH" == /* ]] || die "install path must be absolute: $INSTALL_PATH"
+  [[ "$(basename "$INSTALL_PATH")" == *.app ]] ||
+    die "install path must name an .app bundle: $INSTALL_PATH"
   [[ -d "$install_parent" ]] || die "install parent does not exist: $install_parent"
+  if [[ -e "$INSTALL_PATH" ]]; then
+    [[ -d "$INSTALL_PATH" ]] || die "install path exists but is not an app directory: $INSTALL_PATH"
+    local installed_bundle_id
+    installed_bundle_id="$(defaults read "$INSTALL_PATH/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+    [[ "$installed_bundle_id" == "xyz.block.buzz.app" ]] ||
+      die "refusing to replace unexpected bundle '$installed_bundle_id' at $INSTALL_PATH"
+  fi
 
   if [[ "$DRY_RUN" == "1" ]]; then
+    INSTALL_STAGING_DIR="$install_parent/.buzz-install.DRYRUN"
+    INSTALL_STAGED_APP="$INSTALL_STAGING_DIR/Buzz.app"
+    INSTALL_BACKUP_PATH="$INSTALL_STAGING_DIR/Previous.app"
+    print_cmd mkdir -m 700 "$INSTALL_STAGING_DIR"
+    print_cmd ditto "$APP_PATH" "$INSTALL_STAGED_APP"
     if [[ -e "$INSTALL_PATH" ]]; then
-      print_cmd mv "$INSTALL_PATH" "$backup_path"
+      print_cmd mv "$INSTALL_PATH" "$INSTALL_BACKUP_PATH"
     fi
-    print_cmd ditto "$APP_PATH" "$INSTALL_PATH"
+    print_cmd mv "$INSTALL_STAGED_APP" "$INSTALL_PATH"
     return 0
   fi
 
+  INSTALL_STAGING_DIR="$(mktemp -d "$install_parent/.buzz-install.XXXXXX")"
+  INSTALL_STAGED_APP="$INSTALL_STAGING_DIR/Buzz.app"
+  INSTALL_BACKUP_PATH="$INSTALL_STAGING_DIR/Previous.app"
+
+  log "Staging signed app beside destination"
+  ditto "$APP_PATH" "$INSTALL_STAGED_APP"
+  verify_bundled_executables "$INSTALL_STAGED_APP"
+  verify_signature "$INSTALL_STAGED_APP"
+
   wait_for_buzz_to_quit
 
+  INSTALL_SWAP_STARTED=1
   if [[ -e "$INSTALL_PATH" ]]; then
-    log "Backing up existing app to $backup_path"
-    mv "$INSTALL_PATH" "$backup_path"
+    log "Holding existing app for rollback"
+    mv "$INSTALL_PATH" "$INSTALL_BACKUP_PATH"
   fi
 
-  log "Installing signed app to $INSTALL_PATH"
-  if ! ditto "$APP_PATH" "$INSTALL_PATH"; then
-    if [[ -d "$backup_path" && ! -e "$INSTALL_PATH" ]]; then
-      warn "Install failed; restoring previous app"
-      mv "$backup_path" "$INSTALL_PATH"
-    fi
-    exit 1
-  fi
+  log "Activating signed app at $INSTALL_PATH"
+  mv "$INSTALL_STAGED_APP" "$INSTALL_PATH"
+  INSTALL_ACTIVATED=1
 }
 
 if [[ "$STATUS_ONLY" == "1" ]]; then
@@ -451,6 +573,7 @@ fi
 log "Using code-signing identity $IDENTITY_NAME ($IDENTITY_HASH)"
 sign_nested_executables "$IDENTITY_HASH"
 sign_app_bundle "$IDENTITY_HASH"
+verify_bundled_executables "$APP_PATH"
 verify_signature "$APP_PATH"
 
 if [[ "$NO_INSTALL" == "1" ]]; then
@@ -459,5 +582,6 @@ if [[ "$NO_INSTALL" == "1" ]]; then
 fi
 
 install_app
+verify_bundled_executables "$INSTALL_PATH"
 verify_signature "$INSTALL_PATH"
-log "Done. The next Keychain prompt should need one final Always Allow for this stable identity."
+log "Done. On first launch, allow one final Keychain read so Buzz can create its owner-only local secret blob."
