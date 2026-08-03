@@ -41,6 +41,11 @@ const IN_FLIGHT_DEADLINE_BUFFER_SECS: u64 = 100;
 /// Default in-flight deadline: default max_turn (7200s) + 100s buffer.
 const DEFAULT_IN_FLIGHT_DEADLINE_SECS: u64 = 7300;
 
+/// Keep a task cancellation alive long enough for already-running sibling
+/// agents to finish unwinding and for their late thread replies to reach this
+/// harness. A new top-level message gets a new root and is unaffected.
+const CANCELLED_TASK_ROOT_TTL: Duration = Duration::from_secs(60 * 60);
+
 /// An event waiting in the queue.
 #[derive(Debug, Clone)]
 pub struct QueuedEvent {
@@ -153,6 +158,10 @@ pub struct EventQueue {
     /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
     /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
     cancel_reasons: HashMap<Uuid, CancelReason>,
+    /// Recently-cancelled conversation roots. Incoming descendants are dropped
+    /// during the bounded unwind window so a late delegation cannot restart a
+    /// task the owner just stopped.
+    cancelled_task_roots: HashMap<(Uuid, String), Instant>,
     /// Events withheld from `queues` while a goose-native steer is in flight
     /// for that event. Invisible to `flush_next` / `has_flushable_work` /
     /// `drain` (the events have been moved out of `queues`), so the queue's
@@ -187,6 +196,7 @@ impl EventQueue {
             dedup_mode,
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
+            cancelled_task_roots: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
@@ -228,6 +238,20 @@ impl EventQueue {
     ///
     /// Returns `true` if the event was accepted, `false` if dropped.
     pub fn push(&mut self, event: QueuedEvent) -> bool {
+        self.prune_cancelled_task_roots();
+        let task_root = task_root_event_id(&event.event);
+        if self
+            .cancelled_task_roots
+            .contains_key(&(event.channel_id, task_root.clone()))
+        {
+            tracing::info!(
+                channel_id = %event.channel_id,
+                root_event_id = %task_root,
+                event_id = %event.event.id,
+                "dropping event for cancelled task root"
+            );
+            return false;
+        }
         if matches!(self.dedup_mode, DedupMode::Drop)
             && self.in_flight_channels.contains(&event.channel_id)
         {
@@ -633,12 +657,75 @@ impl EventQueue {
         self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
         self.withheld_native_steer.remove(&channel_id);
+        self.cancelled_task_roots
+            .retain(|(candidate_channel, _), _| *candidate_channel != channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
         // removing in_flight_channels would disable auto-expiry and leave a
         // wedged task permanently blocking the channel.
         ids
+    }
+
+    /// Cancel one conversation tree without disturbing unrelated roots in the
+    /// same channel. Pending and previously-cancelled batches are filtered in
+    /// place; the bounded tombstone rejects late descendant events while the
+    /// rest of the agent mesh unwinds.
+    pub fn cancel_task_root(&mut self, channel_id: Uuid, root_event_id: &str) -> Vec<String> {
+        self.prune_cancelled_task_roots();
+        self.cancelled_task_roots.insert(
+            (channel_id, root_event_id.to_string()),
+            Instant::now() + CANCELLED_TASK_ROOT_TTL,
+        );
+
+        let mut dropped_ids = Vec::new();
+        if let Some(events) = self.queues.get_mut(&channel_id) {
+            events.retain(|queued| {
+                let keep = task_root_event_id(&queued.event) != root_event_id;
+                if !keep {
+                    dropped_ids.push(queued.event.id.to_hex());
+                }
+                keep
+            });
+            if events.is_empty() {
+                self.queues.remove(&channel_id);
+            }
+        }
+
+        if let Some(events) = self.cancelled_batches.get_mut(&channel_id) {
+            events.retain(|batch_event| {
+                let keep = task_root_event_id(&batch_event.event) != root_event_id;
+                if !keep {
+                    dropped_ids.push(batch_event.event.id.to_hex());
+                }
+                keep
+            });
+            if events.is_empty() {
+                self.cancelled_batches.remove(&channel_id);
+                self.cancel_reasons.remove(&channel_id);
+            }
+        }
+
+        if let Some(events) = self.withheld_native_steer.get_mut(&channel_id) {
+            events.retain(|queued| {
+                let keep = task_root_event_id(&queued.event) != root_event_id;
+                if !keep {
+                    dropped_ids.push(queued.event.id.to_hex());
+                }
+                keep
+            });
+            if events.is_empty() {
+                self.withheld_native_steer.remove(&channel_id);
+            }
+        }
+
+        dropped_ids
+    }
+
+    fn prune_cancelled_task_roots(&mut self) {
+        let now = Instant::now();
+        self.cancelled_task_roots
+            .retain(|_, expires_at| *expires_at > now);
     }
 
     /// Whether a prompt is currently in-flight for the given channel.
@@ -884,6 +971,15 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
         parent_event_id,
         mentioned_pubkeys: mentions,
     }
+}
+
+/// Stable task identity for an event: the NIP-10 thread root for replies, or
+/// the event itself for a top-level message.
+pub(crate) fn task_root_event_id(event: &Event) -> String {
+    parse_thread_tags(event)
+        .root_event_id
+        .unwrap_or_else(|| event.id.to_hex())
+        .to_ascii_lowercase()
 }
 
 /// Extract a leading slash command from message content.
@@ -2960,6 +3056,23 @@ mod tests {
     }
 
     #[test]
+    fn test_task_root_event_id_uses_event_for_top_level_and_nip10_root_for_reply() {
+        let top_level = make_event("top level");
+        assert_eq!(task_root_event_id(&top_level), top_level.id.to_hex());
+
+        let reply = make_event_with_tags(
+            "reply",
+            vec![vec![
+                "e".into(),
+                "root123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        assert_eq!(task_root_event_id(&reply), "root123");
+    }
+
+    #[test]
     fn test_format_prompt_with_channel_info() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
@@ -3590,6 +3703,61 @@ mod tests {
         let drained = q.drain_channel(ch);
         assert_eq!(drained.len(), 1);
         assert!(any_in_flight(&q)); // in-flight unaffected
+    }
+
+    #[test]
+    fn test_cancel_task_root_drops_only_matching_pending_events_and_late_descendants() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let cancelled_root = "a".repeat(64);
+        let other_root = "b".repeat(64);
+        let cancelled_reply = make_event_with_tags(
+            "cancel me",
+            vec![vec![
+                "e".into(),
+                cancelled_root.clone(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let other_reply = make_event_with_tags(
+            "keep me",
+            vec![vec!["e".into(), other_root, "".into(), "reply".into()]],
+        );
+
+        assert!(q.push(QueuedEvent {
+            channel_id: ch,
+            event: cancelled_reply,
+            received_at: Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        assert!(q.push(QueuedEvent {
+            channel_id: ch,
+            event: other_reply,
+            received_at: Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+
+        let dropped = q.cancel_task_root(ch, &cancelled_root);
+        assert_eq!(dropped.len(), 1);
+        let surviving = q.flush_next().expect("unrelated task must survive");
+        assert_eq!(surviving.events.len(), 1);
+        assert_ne!(
+            task_root_event_id(&surviving.events[0].event),
+            cancelled_root
+        );
+
+        q.mark_complete(ch);
+        let late_reply = make_event_with_tags(
+            "late delegation",
+            vec![vec!["e".into(), cancelled_root, "".into(), "reply".into()]],
+        );
+        assert!(!q.push(QueuedEvent {
+            channel_id: ch,
+            event: late_reply,
+            received_at: Instant::now(),
+            prompt_tag: "test".into(),
+        }));
     }
 
     #[test]

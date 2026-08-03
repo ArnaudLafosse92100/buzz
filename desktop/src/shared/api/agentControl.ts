@@ -12,6 +12,19 @@ export async function cancelManagedAgentTurn(
   return { status: "sent" };
 }
 
+export async function cancelManagedAgentTask(
+  pubkey: string,
+  channelId: string,
+  rootEventId: string,
+): Promise<CancelManagedAgentTurnResult> {
+  await sendAgentObserverControl(pubkey, {
+    type: "cancel_turn",
+    channelId,
+    rootEventId,
+  });
+  return { status: "sent" };
+}
+
 /**
  * Send a live model-switch control frame to a running agent. The switch rides
  * the harness's cancel-switch-requeue path (busy turn) or invalidate-and-reapply

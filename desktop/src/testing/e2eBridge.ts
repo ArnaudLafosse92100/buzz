@@ -1125,6 +1125,7 @@ declare global {
       channelId: string;
       turnId: string;
       kind?: "turn_started" | "turn_completed";
+      rootEventIds?: string[];
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -9590,6 +9591,7 @@ export function maybeInstallE2eTauriMocks() {
     channelId,
     turnId,
     kind = "turn_started",
+    rootEventIds = [],
   }) => {
     seedTurnSeq += 1;
     const event = {
@@ -9600,7 +9602,10 @@ export function maybeInstallE2eTauriMocks() {
       channelId,
       sessionId: null,
       turnId,
-      payload: null,
+      payload:
+        kind === "turn_started"
+          ? { triggeringRootEventIds: rootEventIds }
+          : null,
     };
     syncAgentTurnsFromEvents(agentPubkey, [event]);
     syncAgentObserverEvents(agentPubkey, [event]);
@@ -9769,6 +9774,26 @@ export function maybeInstallE2eTauriMocks() {
           content: "",
           sig: "e2e-signed-nostr-binding",
         });
+      }
+      case "build_observer_control_event": {
+        const request = payload as {
+          agentPubkey: string;
+          payload: unknown;
+        };
+        return JSON.stringify(
+          createMockEvent(
+            KIND_AGENT_OBSERVER_FRAME,
+            JSON.stringify(request.payload),
+            [
+              ["p", request.agentPubkey],
+              ["agent", request.agentPubkey],
+              ["frame", "control"],
+            ],
+            (identity ?? DEFAULT_MOCK_IDENTITY).pubkey,
+            Math.floor(Date.now() / 1_000),
+            mockEventId(),
+          ),
+        );
       }
       case "sign_out":
         // Production wipes local state and restarts the app. In the browser

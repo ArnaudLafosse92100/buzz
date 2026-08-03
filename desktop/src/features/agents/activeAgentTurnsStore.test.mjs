@@ -6,6 +6,7 @@ import {
   syncActiveAgentTurnsFromObserver,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
+  getActiveAgentPubkeysForTask,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
   saveActiveAgentTurnsForCommunity,
@@ -83,6 +84,38 @@ describe("activeAgentTurnsStore", () => {
       const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
       assert.equal(channels.size, 1);
       assert.ok(channels.has("c1"));
+    });
+  });
+
+  describe("task-root correlation", () => {
+    it("returns only agents working on the requested conversation root", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          channelId: "channel-1",
+          turnId: "turn-a",
+          payload: { triggeringRootEventIds: ["root-a"] },
+        }),
+      ]);
+      syncAgentTurnsFromEvents(AGENT_2, [
+        makeEvent({
+          seq: 1,
+          channelId: "channel-1",
+          turnId: "turn-b",
+          payload: { triggeringRootEventIds: ["root-b"] },
+        }),
+      ]);
+
+      assert.deepEqual(getActiveAgentPubkeysForTask("channel-1", "root-a"), [
+        AGENT,
+      ]);
+      assert.deepEqual(getActiveAgentPubkeysForTask("channel-1", "root-b"), [
+        AGENT_2,
+      ]);
+      assert.deepEqual(
+        getActiveAgentPubkeysForTask("channel-1", "missing"),
+        [],
+      );
     });
   });
 

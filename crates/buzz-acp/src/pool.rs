@@ -36,8 +36,8 @@ use crate::acp::{
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup, ThreadTags,
+    task_root_event_id, CancelReason, ContextMessage, ConversationContext, FlushBatch,
+    PromptChannelInfo, PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -223,6 +223,7 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    task_roots: HashMap<tokio::task::Id, Vec<String>>,
 }
 
 /// Result returned by a completed prompt task.
@@ -271,6 +272,9 @@ fn apply_completed_before_control_signal(
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
+    /// Stop only the work rooted at this Nostr event. If one prompt batch also
+    /// contains unrelated roots, preserve those events for a fresh turn.
+    CancelTask(String),
     /// Stop the current turn and requeue its triggering batch for a merged
     /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
@@ -575,6 +579,7 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            task_roots: HashMap::new(),
         }
     }
 
@@ -648,6 +653,35 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
+    }
+
+    pub fn set_task_roots(&mut self, task_id: tokio::task::Id, roots: Vec<String>) {
+        if roots.is_empty() {
+            self.task_roots.remove(&task_id);
+        } else {
+            self.task_roots.insert(task_id, roots);
+        }
+    }
+
+    pub fn take_task_control_for_root(
+        &mut self,
+        channel_id: Uuid,
+        root_event_id: &str,
+    ) -> Option<tokio::sync::oneshot::Sender<ControlSignal>> {
+        let task_id = self.task_map.iter().find_map(|(task_id, meta)| {
+            (meta.channel_id == Some(channel_id)
+                && self
+                    .task_roots
+                    .get(task_id)
+                    .is_some_and(|roots| roots.iter().any(|root| root == root_event_id)))
+            .then_some(*task_id)
+        })?;
+        self.task_map.get_mut(&task_id)?.control_tx.take()
+    }
+
+    pub fn prune_task_roots(&mut self) {
+        self.task_roots
+            .retain(|task_id, _| self.task_map.contains_key(task_id));
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
@@ -1370,6 +1404,18 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
+    let triggering_root_event_ids: Vec<String> = batch
+        .as_ref()
+        .map(|batch| {
+            batch
+                .events
+                .iter()
+                .map(|event| task_root_event_id(&event.event))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -1378,6 +1424,7 @@ pub async fn run_prompt_task(
                 PromptSource::Heartbeat => "heartbeat",
             },
             "triggeringEventIds": triggering_event_ids,
+            "triggeringRootEventIds": triggering_root_event_ids,
         }),
     );
 
@@ -3177,6 +3224,20 @@ fn requeue_cancelled_batch(
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
         ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
+        ControlSignal::CancelTask(root_event_id) => {
+            let mut batch = batch?;
+            batch
+                .events
+                .retain(|event| task_root_event_id(&event.event) != root_event_id);
+            batch
+                .cancelled_events
+                .retain(|event| task_root_event_id(&event.event) != root_event_id);
+            if batch.events.is_empty() && batch.cancelled_events.is_empty() {
+                return None;
+            }
+            batch.cancel_reason = Some(CancelReason::Steer);
+            return Some(batch);
+        }
         // Cancel/Rotate discard the batch — no merged re-prompt.
         ControlSignal::Cancel | ControlSignal::Rotate => return None,
     };
@@ -4962,6 +5023,26 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn test_cancel_task_preserves_unrelated_roots_even_in_drop_mode() {
+        let channel_id = Uuid::new_v4();
+        let mut batch = one_event_batch(channel_id);
+        let cancelled_root = batch.events[0].event.id.to_hex();
+        let survivor = one_event_batch(channel_id).events.remove(0);
+        let survivor_id = survivor.event.id.to_hex();
+        batch.events.push(survivor);
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Drop;
+        let preserved =
+            requeue_cancelled_batch(&ctx, ControlSignal::CancelTask(cancelled_root), Some(batch))
+                .expect("the unrelated root must be retried");
+
+        assert_eq!(preserved.events.len(), 1);
+        assert_eq!(preserved.events[0].event.id.to_hex(), survivor_id);
+        assert_eq!(preserved.cancel_reason, Some(CancelReason::Steer));
     }
 
     // ── classify_control_cancel_failure ─────────────────────────────────────

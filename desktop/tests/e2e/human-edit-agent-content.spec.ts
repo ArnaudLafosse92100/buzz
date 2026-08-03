@@ -12,6 +12,7 @@ const OWNED_AGENT_PUBKEY =
 // selfMember.role is "member" not "owner", so without the new gate the
 // Edit button would not appear.
 const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
+const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 
 // Mock-bridge helper: wait for the bridge to initialise, then invoke a command.
 async function invoke(
@@ -169,6 +170,163 @@ test("owner does NOT see Edit or Delete for an unowned agent's message", async (
   await expect(
     page.getByTestId(`delete-message-${charlieMessageId}`),
   ).toHaveCount(0);
+});
+
+test("owner stops only the agents working on the selected conversation", async ({
+  page,
+}) => {
+  const messageId = "d".repeat(64);
+
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await page.evaluate((id) => {
+    const win = window as Window & {
+      __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+        channelName: string;
+        content: string;
+        id: string;
+      }) => unknown;
+    };
+    win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "agents",
+      content: "Task-scoped stop target",
+      id,
+    });
+  }, messageId);
+  await expect(page.locator(`[data-message-id="${messageId}"]`)).toBeVisible({
+    timeout: 10_000,
+  });
+
+  await page.waitForFunction(() =>
+    Boolean(
+      (
+        window as Window & {
+          __BUZZ_E2E_SEED_ACTIVE_TURNS__?: unknown;
+        }
+      ).__BUZZ_E2E_SEED_ACTIVE_TURNS__,
+    ),
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId, rootEventId }) => {
+      const win = window as Window & {
+        __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+          agentPubkey: string;
+          channelId: string;
+          turnId: string;
+          rootEventIds: string[];
+        }) => void;
+      };
+      win.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId,
+        turnId: "task-scoped-stop-turn",
+        rootEventIds: [rootEventId],
+      });
+    },
+    {
+      agentPubkey: OWNED_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+      rootEventId: messageId,
+    },
+  );
+
+  await openMoreActionsMenu(page, messageId);
+  const stopItem = page.getByTestId(`stop-task-agents-${messageId}`);
+  await expect(stopItem).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("this conversation");
+    expect(dialog.message()).toContain("Other conversations will continue");
+    await dialog.accept();
+  });
+  await stopItem.click();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const entries =
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: unknown;
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+        return entries
+          .filter((entry) => entry.command === "build_observer_control_event")
+          .map((entry) => entry.payload);
+      }),
+    )
+    .toContainEqual({
+      agentPubkey: OWNED_AGENT_PUBKEY,
+      payload: {
+        type: "cancel_turn",
+        channelId: AGENTS_CHANNEL_ID,
+        rootEventId: messageId,
+      },
+    });
+});
+
+test("channel member cannot stop agents working on a conversation", async ({
+  page,
+}) => {
+  const messageId = "e".repeat(64);
+
+  await page.goto("/");
+  await invoke(page, "add_channel_members", {
+    channelId: RANDOM_CHANNEL_ID,
+    pubkeys: [OWNED_AGENT_PUBKEY],
+    role: "member",
+  });
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.evaluate((id) => {
+    const win = window as Window & {
+      __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+        channelName: string;
+        content: string;
+        id: string;
+      }) => unknown;
+    };
+    win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "random",
+      content: "Member-owned stop target",
+      id,
+    });
+  }, messageId);
+  await expect(page.locator(`[data-message-id="${messageId}"]`)).toBeVisible({
+    timeout: 10_000,
+  });
+  await page.evaluate(
+    ({ agentPubkey, channelId, rootEventId }) => {
+      const win = window as Window & {
+        __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+          agentPubkey: string;
+          channelId: string;
+          turnId: string;
+          rootEventIds: string[];
+        }) => void;
+      };
+      win.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId,
+        turnId: "unauthorized-task-stop-turn",
+        rootEventIds: [rootEventId],
+      });
+    },
+    {
+      agentPubkey: OWNED_AGENT_PUBKEY,
+      channelId: RANDOM_CHANNEL_ID,
+      rootEventId: messageId,
+    },
+  );
+
+  await openMoreActionsMenu(page, messageId);
+  await expect(page.getByTestId(`stop-task-agents-${messageId}`)).toHaveCount(
+    0,
+  );
 });
 
 // ─── Thread-panel gate ────────────────────────────────────────────────────────

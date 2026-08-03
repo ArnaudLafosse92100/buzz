@@ -14,7 +14,6 @@ import {
   Trash2,
 } from "lucide-react";
 import * as React from "react";
-
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
@@ -56,6 +55,7 @@ import {
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { StopTaskAgentsMenuItem } from "./StopTaskAgentsMenuItem";
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
@@ -241,6 +241,10 @@ function MoreActionsMenu({
           ) : null}
 
           {canReport || onDelete ? <DropdownMenuSeparator /> : null}
+
+          {channelId && open ? (
+            <StopTaskAgentsMenuItem channelId={channelId} message={message} />
+          ) : null}
 
           {canReport ? (
             <DropdownMenuItem

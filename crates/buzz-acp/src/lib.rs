@@ -41,7 +41,7 @@ use pool::{
     PromptResult, PromptSource, SessionState, TimeoutKind,
 };
 use pool_lifecycle::PoolLifecycle;
-use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
+use queue::{task_root_event_id, CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -838,7 +838,9 @@ fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
+    queue: &mut EventQueue,
     observer: Option<&observer::ObserverHandle>,
+    rest_client: &relay::RestClient,
     owner_pubkey_hex: &str,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
@@ -880,7 +882,7 @@ fn handle_relay_observer_control_event(
     let command_type = payload.get("type").and_then(|value| value.as_str());
     match command_type {
         Some("cancel_turn") => {
-            handle_cancel_turn_control(&payload, pool, observer);
+            handle_cancel_turn_control(&payload, pool, queue, observer, rest_client);
         }
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
@@ -895,7 +897,9 @@ fn handle_relay_observer_control_event(
 fn handle_cancel_turn_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
+    queue: &mut EventQueue,
     observer: Option<&observer::ObserverHandle>,
+    rest_client: &relay::RestClient,
 ) {
     let Some(channel_id) = payload
         .get("channelId")
@@ -906,8 +910,63 @@ fn handle_cancel_turn_control(
         return;
     };
 
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
+    let root_event_id = match optional_task_root_event_id(payload) {
+        Ok(root_event_id) => root_event_id,
+        Err(()) => {
+            tracing::warn!(
+                channel = %channel_id,
+                "cancel_turn control has invalid rootEventId — ignoring"
+            );
+            if let Some(observer) = observer {
+                observer.emit(
+                    "control_result",
+                    None,
+                    &observer::ObserverContext {
+                        channel_id: Some(channel_id.to_string()),
+                        session_id: None,
+                        turn_id: None,
+                        started_at: None,
+                    },
+                    serde_json::json!({
+                        "type": "cancel_turn",
+                        "status": "invalid_root_event_id",
+                    }),
+                );
+            }
+            return;
+        }
+    };
+
+    let (fired, dropped_ids) = match root_event_id.as_deref() {
+        Some(root) => {
+            let dropped = queue.cancel_task_root(channel_id, root);
+            let fired = signal_in_flight_task_for_root(pool, channel_id, root);
+            (fired, dropped)
+        }
+        None => (
+            signal_in_flight_task(pool, channel_id, ControlSignal::Cancel),
+            Vec::new(),
+        ),
+    };
+
+    if !dropped_ids.is_empty() {
+        let client = rest_client.clone();
+        let cleanup_ids = dropped_ids.clone();
+        tokio::spawn(async move {
+            for event_id in cleanup_ids {
+                pool::reaction_remove(&client, &event_id, "👀").await;
+                pool::reaction_remove(&client, &event_id, "💬").await;
+            }
+        });
+    }
+
+    let status = if fired {
+        "sent"
+    } else if !dropped_ids.is_empty() {
+        "queued_cancelled"
+    } else {
+        "no_active_turn"
+    };
     if let Some(observer) = observer {
         observer.emit(
             "control_result",
@@ -921,8 +980,22 @@ fn handle_cancel_turn_control(
             serde_json::json!({
                 "type": "cancel_turn",
                 "status": status,
+                "rootEventId": root_event_id,
+                "queuedEventsDropped": dropped_ids.len(),
             }),
         );
+    }
+}
+
+fn optional_task_root_event_id(payload: &serde_json::Value) -> Result<Option<String>, ()> {
+    match payload.get("rootEventId") {
+        None => Ok(None),
+        Some(serde_json::Value::String(value))
+            if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Ok(Some(value.to_ascii_lowercase()))
+        }
+        Some(_) => Err(()),
     }
 }
 
@@ -1888,7 +1961,15 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(
+                                    &config.keys,
+                                    event,
+                                    &mut pool,
+                                    &mut queue,
+                                    observer.as_ref(),
+                                    &ctx.rest_client,
+                                    owner_hex,
+                                );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -2797,6 +2878,26 @@ fn signal_in_flight_task(
     false
 }
 
+/// Send a task-scoped cancel only when the in-flight batch contains the
+/// requested conversation root. Unrelated work in the same channel is never
+/// selected by this lookup.
+fn signal_in_flight_task_for_root(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    root_event_id: &str,
+) -> bool {
+    if let Some(tx) = pool.take_task_control_for_root(channel_id, root_event_id) {
+        tracing::info!(
+            channel = %channel_id,
+            root_event_id,
+            "task-scoped control signal sent to in-flight turn"
+        );
+        let _ = tx.send(ControlSignal::CancelTask(root_event_id.to_string()));
+        return true;
+    }
+    false
+}
+
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
@@ -2964,6 +3065,13 @@ fn dispatch_pending(
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
+        let triggering_root_event_ids = batch
+            .events
+            .iter()
+            .map(|event| task_root_event_id(&event.event))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -2978,8 +3086,9 @@ fn dispatch_pending(
             .await;
         });
 
+        let task_id = abort_handle.id();
         pool.task_map_mut().insert(
-            abort_handle.id(),
+            task_id,
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
@@ -2989,6 +3098,7 @@ fn dispatch_pending(
                 steer_tx,
             },
         );
+        pool.set_task_roots(task_id, triggering_root_event_ids);
         dispatched_channels.push((channel_id, typing_scope));
     }
     tracing::debug!(
@@ -3069,6 +3179,7 @@ fn handle_prompt_result(
     let agent_index = result.agent.index;
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
+    pool.prune_task_roots();
     debug_assert_eq!(before, pool.task_map().len() + 1);
 
     // The hard-timeout death_message (below) must describe the batch's
@@ -3438,6 +3549,7 @@ fn recover_panicked_agent(
         tracing::error!("panic for unknown task {task_id:?} — bug");
         return;
     };
+    pool.prune_task_roots();
     let i = meta.agent_index;
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
@@ -4354,6 +4466,26 @@ mod owner_control_command_tests {
         );
     }
 
+    #[test]
+    fn task_root_control_field_is_optional_but_never_falls_back_when_invalid() {
+        assert_eq!(
+            optional_task_root_event_id(&serde_json::json!({})),
+            Ok(None)
+        );
+        assert_eq!(
+            optional_task_root_event_id(&serde_json::json!({
+                "rootEventId": "A".repeat(64)
+            })),
+            Ok(Some("a".repeat(64)))
+        );
+        assert_eq!(
+            optional_task_root_event_id(&serde_json::json!({
+                "rootEventId": "not-a-nostr-event-id"
+            })),
+            Err(())
+        );
+    }
+
     #[tokio::test]
     async fn signal_in_flight_task_sends_rotate_once() {
         let mut pool = AgentPool::from_slots(vec![]);
@@ -4390,6 +4522,45 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+
+    #[tokio::test]
+    async fn task_scoped_signal_ignores_unrelated_root_in_same_channel() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let target_root = "a".repeat(64);
+        let other_root = "b".repeat(64);
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+
+        let abort_handle = pool.join_set.spawn(async {});
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "task-scoped-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+        pool.set_task_roots(task_id, vec![target_root.clone()]);
+
+        assert!(!signal_in_flight_task_for_root(
+            &mut pool,
+            channel_id,
+            &other_root
+        ));
+        assert!(signal_in_flight_task_for_root(
+            &mut pool,
+            channel_id,
+            &target_root
+        ));
+        assert_eq!(
+            control_rx.await.unwrap(),
+            ControlSignal::CancelTask(target_root)
+        );
     }
 }
 

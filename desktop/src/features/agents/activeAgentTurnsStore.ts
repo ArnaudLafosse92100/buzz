@@ -40,6 +40,7 @@ const PRUNE_INTERVAL_MS = 5_000;
 type ActiveTurn = {
   turnId: string;
   channelId: string;
+  rootEventIds: string[];
   startedAt: number;
   lastActivityAt: number;
 };
@@ -84,6 +85,7 @@ const clockOffsetByAgent = new Map<string, number>();
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
+const cachedTaskAgentPubkeys = new Map<string, string[]>();
 
 // Composite watermark per agent: the newest observer event processed, by
 // (timestamp, seq) ordering. An event is processed only if it is strictly
@@ -104,6 +106,22 @@ let pruneInterval: ReturnType<typeof setInterval> | null = null;
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
   cachedChannelTurnSummaries = null;
+  cachedTaskAgentPubkeys.clear();
+}
+
+function rootEventIdsFromPayload(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const roots = (payload as { triggeringRootEventIds?: unknown })
+    .triggeringRootEventIds;
+  if (!Array.isArray(roots)) return [];
+  return [
+    ...new Set(
+      roots
+        .filter((root): root is string => typeof root === "string")
+        .map((root) => root.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function notifyListeners() {
@@ -139,6 +157,7 @@ function startTurn(
   channelId: string,
   turnId: string,
   timestamp: string,
+  rootEventIds: string[] = [],
 ) {
   const key = normalizePubkey(agentPubkey);
   let agentTurns = activeTurnsByAgent.get(key);
@@ -166,6 +185,7 @@ function startTurn(
   agentTurns.set(turnId, {
     turnId,
     channelId,
+    rootEventIds,
     startedAt,
     lastActivityAt: Date.now(),
   });
@@ -214,7 +234,13 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
       ? startedAt
       : event.timestamp;
-  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
+  startTurn(
+    agentPubkey,
+    event.channelId,
+    event.turnId,
+    safeStartedAt,
+    rootEventIdsFromPayload(event.payload),
+  );
   return true;
 }
 
@@ -353,6 +379,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.channelId,
           event.turnId ?? `seq-${event.seq}`,
           event.timestamp,
+          rootEventIdsFromPayload(event.payload),
         );
         notifyListeners();
         return;
@@ -458,6 +485,7 @@ export function getActiveTurnsForAgent(
 
 const EMPTY_TURNS: ActiveTurnSummary[] = [];
 const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
+const EMPTY_AGENT_PUBKEYS: string[] = [];
 
 /**
  * Returns active working channels across all tracked agents, sorted by
@@ -506,6 +534,35 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
   return result;
 }
 
+/** Active agent turns associated with one conversation root. */
+export function getActiveAgentPubkeysForTask(
+  channelId: string | null | undefined,
+  rootEventId: string | null | undefined,
+): string[] {
+  if (!channelId || !rootEventId) return EMPTY_AGENT_PUBKEYS;
+  const normalizedRoot = rootEventId.toLowerCase();
+  const cacheKey = `${channelId}:${normalizedRoot}`;
+  const cached = cachedTaskAgentPubkeys.get(cacheKey);
+  if (cached) return cached;
+
+  const agentPubkeys: string[] = [];
+  for (const [agentPubkey, turns] of activeTurnsByAgent) {
+    if (
+      [...turns.values()].some(
+        (turn) =>
+          turn.channelId === channelId &&
+          turn.rootEventIds.includes(normalizedRoot),
+      )
+    ) {
+      agentPubkeys.push(agentPubkey);
+    }
+  }
+  agentPubkeys.sort();
+  const result = agentPubkeys.length > 0 ? agentPubkeys : EMPTY_AGENT_PUBKEYS;
+  cachedTaskAgentPubkeys.set(cacheKey, result);
+  return result;
+}
+
 /**
  * Synchronize the active-turns store with the latest observer events for a
  * given agent.
@@ -544,6 +601,17 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
     subscribeActiveAgentTurns,
     getActiveTurnsByChannel,
   );
+}
+
+export function useActiveAgentPubkeysForTask(
+  channelId: string | null | undefined,
+  rootEventId: string | null | undefined,
+): string[] {
+  const getSnapshot = React.useCallback(
+    () => getActiveAgentPubkeysForTask(channelId, rootEventId),
+    [channelId, rootEventId],
+  );
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
 }
 
 /**
@@ -619,6 +687,7 @@ export function resetActiveAgentTurnsStore() {
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
+  cachedTaskAgentPubkeys.clear();
   terminalAtByAgent.clear();
   notifyListeners();
 }
@@ -729,6 +798,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
 
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
+  cachedTaskAgentPubkeys.clear();
   notifyListeners();
 }
 
