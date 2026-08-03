@@ -11,6 +11,7 @@ use crate::managed_agents::{
 };
 
 mod runtime_metadata;
+mod sidecars;
 
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
@@ -492,34 +493,6 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     normalized
 }
 
-fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
-    if cfg!(debug_assertions) {
-        // `just dev` builds fresh debug sidecars; never prefer stale release output.
-        [root.join("target/debug"), root.join("target/release")]
-    } else {
-        [root.join("target/release"), root.join("target/debug")]
-    }
-}
-
-fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
-    if let Ok(current_dir) = std::env::current_dir() {
-        dirs.extend(profile_target_dirs(&current_dir));
-    }
-
-    dirs.extend(
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
-    );
-    dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
-        if !unique.contains(&dir) {
-            unique.push(dir);
-        }
-        unique
-    })
-}
-
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
@@ -540,19 +513,6 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
-    if command_looks_like_path(command) {
-        let path = PathBuf::from(command);
-        return is_executable_file(&path).then_some(path);
-    }
-
-    let file_name = executable_basename(command);
-    command_search_dirs()
-        .into_iter()
-        .map(|dir| dir.join(&file_name))
-        .find(|candidate| is_executable_file(candidate))
-}
-
 fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>
 {
     use std::collections::HashMap;
@@ -565,6 +525,10 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 /// The cache eliminates redundant login-shell spawns when multiple agents share
 /// the same binaries (e.g. `npx`, `uvx`).
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
+    if let Some(packaged) = sidecars::resolve_packaged_macos_sidecar(command) {
+        return packaged;
+    }
+
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
     }
@@ -691,7 +655,7 @@ fn resolve_buzz_managed_command(command: &str) -> Option<PathBuf> {
 }
 
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
-    if let Some(path) = resolve_workspace_command(command) {
+    if let Some(path) = sidecars::resolve_workspace_command(command) {
         return Some(path);
     }
 

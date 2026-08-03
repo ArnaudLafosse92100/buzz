@@ -32,10 +32,9 @@ pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
-
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
-
 mod process;
+mod workdir;
 #[cfg(test)]
 use process::{
     buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,
@@ -506,6 +505,7 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    let agent_workdir = workdir::resolve_agent_workdir(&descriptor.env)?;
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -567,8 +567,8 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
+    if let Some(workdir) = agent_workdir {
+        command.current_dir(workdir);
     }
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));

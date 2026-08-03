@@ -1,5 +1,64 @@
 use crate::managed_agents::discovery::{clear_resolve_cache, resolve_command};
 
+#[cfg(unix)]
+#[test]
+fn bundled_sidecar_wins_over_stale_workspace_release_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let executable_dir = temp.path().join("Buzz.app/Contents/MacOS");
+    let workspace_root = temp.path().join("workspace");
+    let stale_release_dir = workspace_root.join("target/release");
+    std::fs::create_dir_all(&executable_dir).expect("create executable dir");
+    std::fs::create_dir_all(&stale_release_dir).expect("create stale release dir");
+
+    let bundled = executable_dir.join("buzz-acp");
+    let stale = stale_release_dir.join("buzz-acp");
+    for path in [&bundled, &stale] {
+        std::fs::write(path, "#!/bin/sh\n").expect("write executable");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod executable");
+    }
+
+    let dirs = super::super::sidecars::command_search_dirs_for(
+        &workspace_root,
+        Some(&workspace_root),
+        Some(&executable_dir),
+    );
+    let resolved = super::super::sidecars::resolve_command_in_dirs("buzz-acp", &dirs);
+
+    assert_eq!(dirs.first(), Some(&executable_dir));
+    assert_eq!(
+        resolved.as_deref(),
+        Some(bundled.as_path()),
+        "the sidecar packaged beside buzz-desktop must remain authoritative"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_app_missing_sidecar_fails_closed_instead_of_using_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app_executable = temp.path().join("Buzz.app/Contents/MacOS/buzz-desktop");
+    std::fs::create_dir_all(app_executable.parent().expect("executable parent"))
+        .expect("create app executable dir");
+    std::fs::write(&app_executable, "desktop").expect("write app executable");
+
+    assert_eq!(
+        super::super::sidecars::packaged_macos_sidecar_resolution("buzz-acp", &app_executable),
+        Some(None),
+        "an incomplete app bundle must not fall back to a stale external harness"
+    );
+    assert_eq!(
+        super::super::sidecars::packaged_macos_sidecar_resolution(
+            "/explicit/custom/buzz-acp",
+            &app_executable
+        ),
+        None,
+        "explicit user paths remain explicit and outside the bundle policy"
+    );
+}
+
 /// The legacy Goose Windows installer wrote `%USERPROFILE%\goose\goose.exe`,
 /// a directory on no standard PATH. `resolve_command_uncached` finds binaries
 /// outside PATH only by scanning `common_binary_paths()`, so that directory

@@ -114,6 +114,13 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Agent working directories use the existing env-layer contract.**
+    `BUZZ_AGENT_WORKDIR` is consumed by the Rust spawn boundary from the
+    effective global < persona < agent environment. An explicit value must be
+    an existing absolute directory and fails closed before logs or processes
+    are created; absence preserves the `~/.buzz` default. Do not hardcode a
+    repository path in a prompt or component, and do not create a second
+    working-directory lookup outside `spawn_agent_child`.
 
 ## The tests that enforce this
 
