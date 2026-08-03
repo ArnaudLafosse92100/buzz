@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    TurnOutput,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -39,6 +40,13 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+
+mod automatic_reply;
+#[cfg(test)]
+use automatic_reply::completed_turn_reply;
+use automatic_reply::{
+    automatic_reply_target, ensure_completed_turn_delivered, AutomaticReplyTarget,
+};
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -1802,6 +1810,7 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    let mut resolved_automatic_reply_target: Option<AutomaticReplyTarget> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -1828,6 +1837,9 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+
+        resolved_automatic_reply_target =
+            automatic_reply_target(b, channel_info.as_ref(), profile_lookup.as_ref());
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -2046,6 +2058,41 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
+                        let turn_output = agent.acp.take_turn_output();
+                        if let Err(error) = ensure_completed_turn_delivered(
+                            &ctx,
+                            &source,
+                            &StopReason::EndTurn,
+                            turn_output,
+                            resolved_automatic_reply_target.as_ref(),
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                target: "pool::delivery",
+                                "completed turn could not be delivered: {error}"
+                            );
+                            agent.state.invalidate(&source);
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                observer_channel_id,
+                                &session_id,
+                                &turn_id,
+                                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                            )
+                            .await;
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(error),
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
@@ -2079,6 +2126,42 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            let turn_output = agent.acp.take_turn_output();
+            if let Err(error) = ensure_completed_turn_delivered(
+                &ctx,
+                &source,
+                &stop_reason,
+                turn_output,
+                resolved_automatic_reply_target.as_ref(),
+            )
+            .await
+            {
+                tracing::error!(
+                    target: "pool::delivery",
+                    "completed turn could not be delivered: {error}"
+                );
+                agent.state.invalidate(&source);
+                let usage = agent.acp.take_turn_usage();
+                publish_agent_turn_metric(
+                    &ctx,
+                    usage,
+                    observer_channel_id,
+                    &session_id,
+                    &turn_id,
+                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                )
+                .await;
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -3793,6 +3876,163 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn completed_turn_reply_covers_delivery_decision_boundary() {
+        let channel = PromptSource::Channel(Uuid::new_v4());
+        let heartbeat = PromptSource::Heartbeat;
+        let target = AutomaticReplyTarget {
+            channel_id: Uuid::new_v4(),
+            root_event_id: None,
+            parent_event_id: None,
+            requires_reply: true,
+        };
+        let answer = TurnOutput {
+            final_text: "  final answer  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            completed_turn_reply(&channel, &StopReason::EndTurn, &answer, Some(&target))
+                .unwrap()
+                .as_deref(),
+            Some("final answer")
+        );
+        assert!(
+            completed_turn_reply(&heartbeat, &StopReason::EndTurn, &answer, Some(&target))
+                .unwrap()
+                .is_none()
+        );
+        for terminal_reason in [
+            StopReason::MaxTokens,
+            StopReason::MaxTurnRequests,
+            StopReason::Refusal,
+        ] {
+            assert_eq!(
+                completed_turn_reply(&channel, &terminal_reason, &answer, Some(&target))
+                    .unwrap()
+                    .as_deref(),
+                Some("final answer")
+            );
+        }
+        assert!(
+            completed_turn_reply(&channel, &StopReason::Cancelled, &answer, Some(&target))
+                .unwrap()
+                .is_none()
+        );
+        assert!(completed_turn_reply(
+            &channel,
+            &StopReason::EndTurn,
+            &TurnOutput {
+                final_text: " \n ".into(),
+                ..Default::default()
+            },
+            Some(&AutomaticReplyTarget {
+                requires_reply: false,
+                ..target.clone()
+            }),
+        )
+        .unwrap()
+        .is_none());
+        assert!(completed_turn_reply(
+            &channel,
+            &StopReason::EndTurn,
+            &TurnOutput {
+                final_text: "already posted".into(),
+                published_via_cli: true,
+                ..Default::default()
+            },
+            Some(&target),
+        )
+        .unwrap()
+        .is_none());
+        assert!(completed_turn_reply(
+            &channel,
+            &StopReason::EndTurn,
+            &TurnOutput {
+                publish_attempted: true,
+                ..Default::default()
+            },
+            Some(&target),
+        )
+        .is_err());
+        assert!(completed_turn_reply(
+            &channel,
+            &StopReason::EndTurn,
+            &TurnOutput::default(),
+            Some(&target),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn automatic_reply_target_flattens_human_top_level_to_trigger() {
+        let batch = one_event_batch(Uuid::new_v4());
+        let last = batch.events.last().unwrap();
+        let trigger_id = last.event.id.to_hex();
+        let profiles = HashMap::from([(
+            last.event.pubkey.to_hex(),
+            PromptProfile {
+                is_agent: false,
+                ..Default::default()
+            },
+        )]);
+
+        let target = automatic_reply_target(&batch, None, Some(&profiles)).unwrap();
+        assert_eq!(target.root_event_id.as_deref(), Some(trigger_id.as_str()));
+        assert_eq!(target.parent_event_id.as_deref(), Some(trigger_id.as_str()));
+        assert!(target.requires_reply);
+    }
+
+    #[test]
+    fn automatic_reply_target_nests_agent_only_turn_under_existing_root() {
+        let keys = Keys::generate();
+        let root_id = "a".repeat(64);
+        let prior_parent_id = "b".repeat(64);
+        let root_tag = Tag::parse(["e", root_id.as_str(), "", "root"]).unwrap();
+        let reply_tag = Tag::parse(["e", prior_parent_id.as_str(), "", "reply"]).unwrap();
+        let event = EventBuilder::new(Kind::Custom(9), "agent task")
+            .tags([root_tag, reply_tag])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let trigger_id = event.id.to_hex();
+        let author = event.pubkey.to_hex();
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let profiles = HashMap::from([(
+            author,
+            PromptProfile {
+                is_agent: true,
+                ..Default::default()
+            },
+        )]);
+
+        let target = automatic_reply_target(&batch, None, Some(&profiles)).unwrap();
+        assert_eq!(target.root_event_id.as_deref(), Some(root_id.as_str()));
+        assert_eq!(target.parent_event_id.as_deref(), Some(trigger_id.as_str()));
+        assert!(!target.requires_reply);
+    }
+
+    #[test]
+    fn automatic_reply_target_keeps_top_level_dm_unthreaded() {
+        let batch = one_event_batch(Uuid::new_v4());
+        let channel = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let target = automatic_reply_target(&batch, Some(&channel), None).unwrap();
+        assert_eq!(target.root_event_id, None);
+        assert_eq!(target.parent_event_id, None);
+        assert!(target.requires_reply);
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user

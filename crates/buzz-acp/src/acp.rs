@@ -16,6 +16,10 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
 
+mod turn_output;
+pub(crate) use turn_output::TurnOutput;
+use turn_output::TurnOutputCapture;
+
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
@@ -103,6 +107,12 @@ pub enum AcpError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+
+    /// The agent completed normally, but the harness could not deliver its
+    /// captured final response to Buzz. This is retryable and does not imply
+    /// that the ACP subprocess or stdio protocol is poisoned.
+    #[error("Buzz response delivery failed: {0}")]
+    Delivery(String),
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
@@ -211,6 +221,9 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Harness-owned capture of the current turn's final assistant text and
+    /// any explicit Buzz publication. Reset before every `session/prompt`.
+    turn_output: TurnOutputCapture,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +563,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_output: TurnOutputCapture::default(),
         })
     }
 
@@ -751,6 +765,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.turn_output.reset();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -805,6 +820,11 @@ impl AcpClient {
             }
         }
         self.parse_stop_reason(&result?)
+    }
+
+    /// Consume the output captured for the most recently completed prompt.
+    pub(crate) fn take_turn_output(&mut self) -> TurnOutput {
+        self.turn_output.take()
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -1714,11 +1734,13 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_output.push_text(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
             }
             "tool_call" => {
+                self.turn_output.tool_started(update);
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -1731,6 +1753,7 @@ impl AcpClient {
                 true
             }
             "tool_call_update" => {
+                self.turn_output.tool_updated(update);
                 let tool_id = update
                     .get("toolCallId")
                     .and_then(|v| v.as_str())
@@ -2222,6 +2245,219 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_output_keeps_only_text_after_latest_tool_boundary() {
+        let mut capture = TurnOutputCapture::default();
+        capture.push_text("I will inspect the repository first.");
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "read-1",
+            "title": "sed -n '1,80p' src/main.rs"
+        }));
+        capture.push_text("Verified final answer.");
+
+        assert_eq!(
+            capture.take(),
+            TurnOutput {
+                final_text: "Verified final answer.".into(),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn completed_buzz_send_suppresses_fallback() {
+        let mut capture = TurnOutputCapture::default();
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "send-1",
+            "title": "printf 'done' | buzz messages send --channel abc --content -"
+        }));
+        capture.tool_updated(&serde_json::json!({
+            "toolCallId": "send-1",
+            "status": "completed",
+            "content": [{
+                "type": "content",
+                "content": {
+                    "type": "text",
+                    "text": "{\"accepted\":true,\"event_id\":\"abc\"}\n"
+                }
+            }],
+            "rawOutput": { "isError": false }
+        }));
+        capture.push_text("The response was posted.");
+
+        assert!(capture.take().published_via_cli);
+    }
+
+    #[test]
+    fn raw_input_command_is_detected_when_tool_title_is_generic() {
+        let mut capture = TurnOutputCapture::default();
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "send-2",
+            "title": "bash",
+            "rawInput": {
+                "command": "buzz messages send --channel abc --content 'done'"
+            }
+        }));
+        capture.tool_updated(&serde_json::json!({
+            "toolCallId": "send-2",
+            "status": "completed",
+            "rawOutput": {
+                "metadata": {
+                    "output": "{\"accepted\":true,\"event_id\":\"def\"}"
+                }
+            }
+        }));
+
+        assert!(capture.take().published_via_cli);
+    }
+
+    #[test]
+    fn open_code_terminal_update_can_supply_command_and_acceptance_late() {
+        let mut capture = TurnOutputCapture::default();
+
+        // Observed OpenCode ACP behavior: the start notification can identify
+        // only the generic shell tool. The completed update carries the input
+        // and a shell result shaped like OpenCode's persisted tool part.
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "call_a3007f63be4a4b0cb182e262",
+            "title": "bash",
+            "kind": "execute"
+        }));
+        capture.tool_updated(&serde_json::json!({
+            "toolCallId": "call_a3007f63be4a4b0cb182e262",
+            "title": "buzz messages send --channel abc --reply-to event --content done",
+            "status": "completed",
+            "rawInput": {
+                "command": "buzz messages send --channel abc --reply-to event --content 'done'",
+                "timeout": 15000
+            },
+            "rawOutput": {
+                "output": "{\"accepted\":true,\"event_id\":\"e95b\",\"mention_pubkeys\":[],\"message\":\"\"}\n",
+                "metadata": {
+                    "output": "{\"accepted\":true,\"event_id\":\"e95b\",\"mention_pubkeys\":[],\"message\":\"\"}\n",
+                    "exit": 0,
+                    "truncated": false
+                }
+            }
+        }));
+        capture.push_text("The send was accepted.");
+
+        assert_eq!(
+            capture.take(),
+            TurnOutput {
+                final_text: "The send was accepted.".into(),
+                publish_attempted: true,
+                published_via_cli: true,
+            }
+        );
+    }
+
+    #[test]
+    fn nonzero_open_code_shell_exit_cannot_fake_buzz_acceptance() {
+        let mut capture = TurnOutputCapture::default();
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "send-failed",
+            "title": "bash"
+        }));
+        capture.tool_updated(&serde_json::json!({
+            "toolCallId": "send-failed",
+            "status": "completed",
+            "rawInput": {
+                "command": "buzz messages send --channel abc --content done"
+            },
+            "rawOutput": {
+                "output": "{\"accepted\":true,\"event_id\":\"not-real\"}\n",
+                "metadata": { "exit": 1 }
+            }
+        }));
+
+        assert!(!capture.take().published_via_cli);
+    }
+
+    #[test]
+    fn source_search_is_not_misclassified_as_publication() {
+        let mut capture = TurnOutputCapture::default();
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "search-1",
+            "title": "rg -n 'buzz messages send' crates/buzz-acp"
+        }));
+        capture.tool_updated(&serde_json::json!({
+            "toolCallId": "search-1",
+            "status": "completed"
+        }));
+
+        assert!(!capture.take().published_via_cli);
+    }
+
+    #[test]
+    fn failed_or_error_buzz_send_does_not_suppress_fallback() {
+        for terminal_update in [
+            serde_json::json!({
+                "toolCallId": "send-3",
+                "status": "failed"
+            }),
+            serde_json::json!({
+                "toolCallId": "send-3",
+                "status": "completed",
+                "content": [{
+                    "type": "content",
+                    "content": {
+                        "type": "text",
+                        "text": "{\"accepted\":true,\"event_id\":\"ghi\"}"
+                    }
+                }],
+                "rawOutput": { "isError": true }
+            }),
+        ] {
+            let mut capture = TurnOutputCapture::default();
+            capture.tool_started(&serde_json::json!({
+                "toolCallId": "send-3",
+                "title": "buzz messages send --channel abc --content done"
+            }));
+            capture.tool_updated(&terminal_update);
+            capture.push_text("Delivery failed; here is the result.");
+
+            let output = capture.take();
+            assert!(!output.published_via_cli);
+            assert_eq!(output.final_text, "Delivery failed; here is the result.");
+        }
+    }
+
+    #[test]
+    fn completed_shell_without_buzz_acceptance_does_not_suppress_fallback() {
+        let mut capture = TurnOutputCapture::default();
+        capture.tool_started(&serde_json::json!({
+            "toolCallId": "send-4",
+            "title": "buzz messages send --channel abc --content done"
+        }));
+        capture.tool_updated(&serde_json::json!({
+            "toolCallId": "send-4",
+            "status": "completed",
+            "rawOutput": {
+                "metadata": { "exit": 1 },
+                "output": "zsh: unmatched quote"
+            }
+        }));
+        capture.push_text("The CLI send failed, but this final answer remains deliverable.");
+
+        let output = capture.take();
+        assert!(!output.published_via_cli);
+        assert_eq!(
+            output.final_text,
+            "The CLI send failed, but this final answer remains deliverable."
+        );
+    }
+
+    #[test]
+    fn turn_output_reset_prevents_cross_turn_leakage() {
+        let mut capture = TurnOutputCapture::default();
+        capture.push_text("old turn");
+        capture.reset();
+        capture.push_text("new turn");
+
+        assert_eq!(capture.take().final_text, "new turn");
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
