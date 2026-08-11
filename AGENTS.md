@@ -592,3 +592,24 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+---
+
+## Graphify
+
+Graphify is a local derived index for architecture navigation and impact
+analysis. Current source and authenticated operational evidence remain the
+authorities. Never treat the graph as proof of relay/database state, Nostr
+authorization, deployment, CI, Block-internal repositories, signing identity,
+secrets, or CRM/Buzz production integration status.
+
+Use only the isolated `graphifyy==0.9.39` environment and the workflow in
+`docs/graphify-workflow.md`. Routine updates are directed, clustered, local
+code-only AST extraction. Do not automatically enable semantic/LLM extraction,
+MCP, Graphify memory, a global graph, URL ingestion, wiki/Obsidian export, or CI.
+
+Use `query`, `path`, `affected`, and `explain` to discover likely code paths,
+then verify every material claim in current source and, when relevant, live
+systems. YAML, documentation, public/static assets, generated outputs, Hermit
+state, and external ecosystem repositories are outside the automatic graph and
+must be checked directly when authoritative.
