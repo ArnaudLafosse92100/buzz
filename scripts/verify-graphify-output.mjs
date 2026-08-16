@@ -6,7 +6,10 @@ import { dirname, extname, relative, resolve, sep } from 'node:path';
 
 const graphPath = resolve(process.argv[2] ?? 'graphify-out/graph.json');
 const outDir = dirname(graphPath);
-const repoRoot = resolve(outDir, '..');
+// An external staged graph may name its source root explicitly as argv[3].
+// Production controllers omit it, so inherited environment cannot redirect
+// freshness checks to another repository.
+const repoRoot = resolve(process.argv[3] ?? resolve(outDir, '..'));
 const graph = JSON.parse(readFileSync(graphPath, 'utf8'));
 const manifest = JSON.parse(readFileSync(resolve(outDir, 'manifest.json'), 'utf8'));
 const statIndex = JSON.parse(readFileSync(resolve(outDir, 'cache/stat-index.json'), 'utf8'));
@@ -16,7 +19,9 @@ const links = Array.isArray(graph.links) ? graph.links : graph.edges;
 if (!graph.directed) throw new Error('Expected graph.directed to be true.');
 if (!Array.isArray(links)) throw new Error('Expected a links or edges array.');
 if (!nodes.length) throw new Error('Expected at least one graph node.');
-if (existsSync(resolve(outDir, 'memory'))) throw new Error('Graph memory directory is prohibited.');
+if (existsSync(resolve(outDir, 'memory'))) {
+  throw new Error('In-tree Graphify memory is prohibited; use the external runtime memory directory.');
+}
 
 const prohibited = [
   'graphify-out/', '.graphify/', '.agents/', '.claude/', '.codex/', '.goose/',
@@ -64,6 +69,8 @@ const sourcePaths = new Set(nodes.map((node) => node.source_file)
 const edgeSourcePaths = new Set(links.map((link) => link.source_file)
   .filter((value) => typeof value === 'string' && value));
 const metadataPaths = new Set([...sourcePaths, ...edgeSourcePaths]);
+const inTreeMemorySources = [...metadataPaths]
+  .filter((path) => normalizePath(path).startsWith('graphify-out/memory/'));
 const absolute = [...metadataPaths].filter(isAbsolutePath);
 const forbidden = [...metadataPaths].filter(isProhibitedPath);
 const oldRootReferences = JSON.stringify(graph).match(/\/Users\/arnaud\/Documents\/Buzz-CRM/g) ?? [];
@@ -91,10 +98,17 @@ const changedEligibleFiles = eligibleCodeFiles.filter((path) => {
   const expectedHash = statIndex[path]?.hashes?.[path];
   return expectedHash ? hashForStatIndex(path) !== expectedHash : false;
 });
-const deletedEligibleFiles = Object.keys(manifest).filter((path) =>
-  isEligibleCodePath(path) && !existsSync(resolve(repoRoot, path)));
+const deletedEligibleFiles = [...new Set([
+  ...Object.keys(manifest).filter((path) =>
+    isEligibleCodePath(path) && !existsSync(resolve(repoRoot, path))),
+  ...[...metadataPaths].filter((path) =>
+    Object.hasOwn(statIndex, path) && isEligibleCodePath(path) && !existsSync(resolve(repoRoot, path))),
+])];
 
 if (absolute.length) throw new Error(`Absolute source paths: ${absolute.slice(0, 5).join(', ')}`);
+if (inTreeMemorySources.length) {
+  throw new Error(`Graph contains in-tree Graphify memory sources: ${inTreeMemorySources.slice(0, 5).join(', ')}`);
+}
 if (forbidden.length) throw new Error(`Prohibited source paths: ${forbidden.slice(0, 5).join(', ')}`);
 if (oldRootReferences.length) throw new Error(`Old Buzz-CRM root references: ${oldRootReferences.length}`);
 if (missingRoots.length) throw new Error(`Expected source roots missing: ${missingRoots.join(', ')}`);
