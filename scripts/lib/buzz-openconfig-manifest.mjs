@@ -7,7 +7,8 @@ export const engineRoot = `${openConfigRoot}/prompts`;
 export const personaRoot = "/Users/arnaud/.buzz/.opencode/personas";
 export const personaSourceRoot = `${buzzRepoRoot}/scripts/config/buzz-openconfig-personas`;
 
-function role(name, slug, engine, persona, model, variant, acpPort) {
+function role(name, slug, engine, persona, acpPort) {
+  const [routeSection, filename] = engine.split("/");
   return Object.freeze({
     name,
     displayName: name,
@@ -17,30 +18,30 @@ function role(name, slug, engine, persona, model, variant, acpPort) {
     persona,
     personaPath: `${personaRoot}/${persona}`,
     personaSource: `${personaSourceRoot}/${slug}.md`,
-    model,
-    variant,
+    routeSection,
+    routeName: filename.replace(/\.md$/, ""),
     acpPort,
   });
 }
 
 // Single source of truth for the public Buzz roster. Names and slugs are the
 // canonical OpenConfig identities so prompts, teams, logs, and upstream updates
-// all use one vocabulary. A null variant means the upstream profile uses its
-// model default.
+// all use one vocabulary. Models, fallbacks, reasoning, and variants are never
+// copied here: they are resolved from OpenConfig's named runtime profile.
 export const openConfigRoles = Object.freeze([
-  role("Sisyphus", "sisyphus", "agents/sisyphus.md", "e07a513e-f3c4-46df-b7d5-1b7675e5c3ee.md", "openrouter/z-ai/glm-5.2-exacto", "low", 4105),
-  role("Hephaestus", "hephaestus", "agents/hephaestus.md", "032894bb-92f6-4b16-91ac-1e1ba292fa2a.md", "subscription-gateway/gpt-5.6-terra", "high", 4106),
-  role("Oracle", "oracle", "agents/oracle.md", "75f32831-215c-4a9c-92dd-1bc9037c783d.md", "subscription-gateway/gpt-5.6-sol", "high", 4107),
-  role("Sisyphus Junior", "sisyphus-junior", "agents/sisyphus-junior.md", "89757873-0389-42ee-8f34-db644eccd02a.md", "openrouter/deepseek/deepseek-v4-flash", "low", 4108),
-  role("Bug Hunt", "bug-hunt", "categories/bug-hunt.md", "c1bc49ff-3604-48fe-bfe6-4db7cf2ac4c3.md", "openrouter/z-ai/glm-5.2-exacto", "low", 4109),
-  role("Prometheus", "prometheus", "agents/prometheus.md", "openconfig-prometheus.md", "openrouter/z-ai/glm-5.2-exacto", "low", 4110),
-  role("Atlas", "atlas", "agents/atlas.md", "openconfig-atlas.md", "openrouter/z-ai/glm-5.2-exacto", "low", 4111),
-  role("Explore", "explore", "agents/explore.md", "openconfig-explore.md", "openrouter/deepseek/deepseek-v4-flash", "low", 4112),
-  role("Librarian", "librarian", "agents/librarian.md", "openconfig-librarian.md", "openrouter/deepseek/deepseek-v4-flash", "low", 4113),
-  role("Multimodal Looker", "multimodal-looker", "agents/multimodal-looker.md", "openconfig-multimodal-looker.md", "openrouter/anthropic/claude-sonnet-5", null, 4114),
-  role("Metis", "metis", "agents/metis.md", "openconfig-metis.md", "openrouter/anthropic/claude-sonnet-5", "medium", 4115),
-  role("Momus", "momus", "agents/momus.md", "openconfig-momus.md", "subscription-gateway/gpt-5.6-sol-review", "max", 4116),
-  role("Content-Aware Research", "content-aware-research", "agents/content-aware-research.md", "openconfig-content-aware-research.md", "openrouter/deepseek/deepseek-v4-flash", "high", 4117),
+  role("Sisyphus", "sisyphus", "agents/sisyphus.md", "e07a513e-f3c4-46df-b7d5-1b7675e5c3ee.md", 4105),
+  role("Hephaestus", "hephaestus", "agents/hephaestus.md", "032894bb-92f6-4b16-91ac-1e1ba292fa2a.md", 4106),
+  role("Oracle", "oracle", "agents/oracle.md", "75f32831-215c-4a9c-92dd-1bc9037c783d.md", 4107),
+  role("Sisyphus Junior", "sisyphus-junior", "agents/sisyphus-junior.md", "89757873-0389-42ee-8f34-db644eccd02a.md", 4108),
+  role("Bug Hunt", "bug-hunt", "categories/bug-hunt.md", "c1bc49ff-3604-48fe-bfe6-4db7cf2ac4c3.md", 4109),
+  role("Prometheus", "prometheus", "agents/prometheus.md", "openconfig-prometheus.md", 4110),
+  role("Atlas", "atlas", "agents/atlas.md", "openconfig-atlas.md", 4111),
+  role("Explore", "explore", "agents/explore.md", "openconfig-explore.md", 4112),
+  role("Librarian", "librarian", "agents/librarian.md", "openconfig-librarian.md", 4113),
+  role("Multimodal Looker", "multimodal-looker", "agents/multimodal-looker.md", "openconfig-multimodal-looker.md", 4114),
+  role("Metis", "metis", "agents/metis.md", "openconfig-metis.md", 4115),
+  role("Momus", "momus", "agents/momus.md", "openconfig-momus.md", 4116),
+  role("Content-Aware Research", "content-aware-research", "agents/content-aware-research.md", "openconfig-content-aware-research.md", 4117),
 ]);
 
 export const shipFeatureInstructions = `This team delivers software through a visible OpenConfig pipeline in one Buzz thread.

@@ -11,40 +11,62 @@ set -euo pipefail
 prompt_file="${BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE:-}"
 engine_prompt_file="${BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE:-}"
 opencode_bin="${BUZZ_OPENCONFIG_OPENCODE_BIN:-$HOME/.opencode/bin/opencode}"
-model="${BUZZ_OPENCONFIG_MODEL:-openrouter/z-ai/glm-5.2-exacto}"
-variant="${BUZZ_OPENCONFIG_VARIANT:-}"
 agent_name="${BUZZ_OPENCONFIG_AGENT_NAME:-buzz-persona}"
+profile="${BUZZ_OPENCONFIG_PROFILE:-normal}"
+route_section="${BUZZ_OPENCONFIG_ROUTE_SECTION:-agents}"
+route_name="${BUZZ_OPENCONFIG_ROUTE_NAME:-$agent_name}"
+project_dir="${BUZZ_OPENCONFIG_PROJECT_DIR:-}"
 openconfig_dir="${BUZZ_OPENCONFIG_CONFIG_DIR:-$HOME/.config/opencode}"
-runtime_config_dir="${BUZZ_OPENCONFIG_RUNTIME_CONFIG_DIR:-$HOME/.buzz/.opencode/runtime-config}"
-runtime_xdg_config_home="${BUZZ_OPENCONFIG_RUNTIME_XDG_CONFIG_HOME:-$HOME/.buzz/.opencode/xdg-config}"
 openconfig_env="$openconfig_dir/.env"
 openconfig_common="$openconfig_dir/lib/common.sh"
 
-# OpenCode installs its SDK dependency into OPENCODE_CONFIG_DIR. Keep that
-# mutable runtime state out of the pinned OpenConfig checkout, otherwise every
-# agent restart recreates package.json, package-lock.json, and node_modules in
-# the source tree. The effective config remains source-of-truth through these
-# read-only-facing symlinks while OpenCode owns only the isolated runtime dir.
-umask 077
-mkdir -p "$runtime_config_dir"
-mkdir -p "$runtime_xdg_config_home"
-runtime_config_dir="$(cd "$runtime_config_dir" && pwd -P)"
-runtime_xdg_config_home="$(cd "$runtime_xdg_config_home" && pwd -P)"
 openconfig_dir="$(cd "$openconfig_dir" && pwd -P)"
-if [[ "$runtime_config_dir" == "$openconfig_dir" ]]; then
-    echo "buzz-openconfig-acp: runtime config directory must differ from OpenConfig source" >&2
-    exit 64
-fi
 if ! command -v jq >/dev/null 2>&1; then
     echo "buzz-openconfig-acp: jq is required" >&2
     exit 69
 fi
-xdg_opencode_dir="$runtime_xdg_config_home/opencode"
-if [[ -e "$xdg_opencode_dir" && ! -L "$xdg_opencode_dir" ]]; then
-    echo "buzz-openconfig-acp: refusing to replace runtime XDG config entry: $xdg_opencode_dir" >&2
-    exit 73
+if [[ ! -x "$openconfig_dir/oc" ]]; then
+    echo "buzz-openconfig-acp: OpenConfig CLI is missing: $openconfig_dir/oc" >&2
+    exit 69
 fi
-ln -sfn "$runtime_config_dir" "$xdg_opencode_dir"
+case "$profile" in normal|pentest) ;; *)
+    echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_PROFILE must be normal or pentest" >&2
+    exit 64
+esac
+case "$route_section" in agents|categories) ;; *)
+    echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_ROUTE_SECTION must be agents or categories" >&2
+    exit 64
+esac
+if [[ ! "$route_name" =~ ^[a-z][a-z0-9-]{0,63}$ ]]; then
+    echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_ROUTE_NAME must be a lowercase slug" >&2
+    exit 64
+fi
+if [[ -z "$project_dir" || ! -d "$project_dir" ]]; then
+    echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_PROJECT_DIR must name an existing project" >&2
+    exit 64
+fi
+project_dir="$(cd "$project_dir" && pwd -P)"
+
+# Resolve the logical route and immutable profile overlay from OpenConfig at
+# process start. Buzz stores no model identifier and therefore cannot drift.
+route_json="$("$openconfig_dir/oc" profile resolve "$profile" "$route_section" "$route_name")"
+model="$(jq -er '.model | select(type == "string" and length > 0)' <<<"$route_json")"
+variant="$(jq -er '.variant // "" | select(type == "string")' <<<"$route_json")"
+profile_config_dir="$("$openconfig_dir/oc" profile path "$profile")"
+profile_config_dir="$(cd "$profile_config_dir" && pwd -P)"
+profile_xdg_config_home="$("$openconfig_dir/oc" profile xdg-path "$profile")"
+profile_xdg_config_home="$(cd "$profile_xdg_config_home" && pwd -P)"
+runtime_config_dir="${BUZZ_OPENCONFIG_RUNTIME_CONFIG_DIR:-$HOME/.buzz/.opencode/runtime-config/$profile}"
+
+# OpenCode installs its SDK dependency into OPENCODE_CONFIG_DIR. Keep that
+# mutable state in a Buzz-owned overlay linked to OpenConfig's rendered profile.
+umask 077
+mkdir -p "$runtime_config_dir"
+runtime_config_dir="$(cd "$runtime_config_dir" && pwd -P)"
+if [[ "$runtime_config_dir" == "$openconfig_dir" || "$runtime_config_dir" == "$profile_config_dir" ]]; then
+    echo "buzz-openconfig-acp: runtime config directory must differ from OpenConfig source and profile" >&2
+    exit 64
+fi
 for config_entry in \
     AGENTS.md \
     opencode.json \
@@ -55,7 +77,7 @@ for config_entry in \
     teams \
     agents \
     projects.json; do
-    source_path="$openconfig_dir/$config_entry"
+    source_path="$profile_config_dir/$config_entry"
     target_path="$runtime_config_dir/$config_entry"
     [[ -e "$source_path" ]] || continue
     if [[ -e "$target_path" && ! -L "$target_path" ]]; then
@@ -71,7 +93,7 @@ done
 # instead: preserve every upstream TUI preference while disabling only native
 # OpenCode notifications. The pinned source remains untouched, so ordinary
 # OpenCode sessions keep their existing notification behavior.
-source_tui="$openconfig_dir/tui.json"
+source_tui="$profile_config_dir/tui.json"
 runtime_tui="$runtime_config_dir/tui.json"
 if [[ -e "$runtime_tui" && ! -f "$runtime_tui" ]]; then
     echo "buzz-openconfig-acp: refusing to replace non-file runtime TUI config: $runtime_tui" >&2
@@ -105,12 +127,26 @@ if ! mv -f -- "$runtime_tui_tmp" "$runtime_tui"; then
     echo "buzz-openconfig-acp: failed to install Buzz TUI config: $runtime_tui" >&2
     exit 74
 fi
-# OpenCode also initializes its conventional XDG config path even when
-# OPENCODE_CONFIG_DIR is set. Point both paths at the same isolated directory;
-# otherwise ~/.config/opencode may still resolve to the pinned source checkout
-# and receive generated package files.
-export XDG_CONFIG_HOME="$runtime_xdg_config_home"
 export OPENCODE_CONFIG_DIR="$runtime_config_dir"
+export XDG_CONFIG_HOME="$profile_xdg_config_home"
+
+# OmO also reads a project-local override. Materialize the selected profile in
+# Buzz-CRM so Buzz stays on `normal` even while the user's global profile is
+# `pentest`. This generated file is ignored by Git and is not an authority.
+project_omo_dir="$project_dir/.omo"
+if [[ -L "$project_omo_dir" ]]; then
+    echo "buzz-openconfig-acp: refusing symlinked project OmO directory: $project_omo_dir" >&2
+    exit 73
+fi
+mkdir -p "$project_omo_dir"
+project_omo="$project_omo_dir/omo.jsonc"
+if [[ -e "$project_omo" && ! -f "$project_omo" ]]; then
+    echo "buzz-openconfig-acp: refusing non-file project OmO config: $project_omo" >&2
+    exit 73
+fi
+project_omo_tmp="$(mktemp "$project_omo_dir/.omo.jsonc.XXXXXX")"
+jq '{"[opencode]": .}' "$profile_config_dir/oh-my-openagent.json" >"$project_omo_tmp"
+mv -f -- "$project_omo_tmp" "$project_omo"
 
 # The desktop app does not start through the user's interactive shell, so it
 # does not inherit the OpenConfig .env automatically. Reuse OpenConfig's
@@ -135,7 +171,7 @@ if [[ ! "$agent_name" =~ ^[a-z][a-z0-9-]{0,63}$ ]]; then
     exit 64
 fi
 if [[ -n "$variant" && ! "$variant" =~ ^(low|medium|high|max)$ ]]; then
-    echo "buzz-openconfig-acp: BUZZ_OPENCONFIG_VARIANT must be low, medium, high, max, or empty" >&2
+    echo "buzz-openconfig-acp: resolved OpenConfig variant is unsupported: $variant" >&2
     exit 64
 fi
 
@@ -178,9 +214,9 @@ if [[ -n "$engine_prompt_file" ]]; then
     fi
     engine_prompt_file="$(cd "$(dirname "$engine_prompt_file")" && pwd -P)/$(basename "$engine_prompt_file")"
     case "$engine_prompt_file" in
-        /Volumes/PERSO/OpenConfig/prompts/*.md) ;;
+        "$openconfig_dir/prompts/"*.md) ;;
         *)
-            echo "buzz-openconfig-acp: engine prompt must be under /Volumes/PERSO/OpenConfig/prompts" >&2
+            echo "buzz-openconfig-acp: engine prompt must be under $openconfig_dir/prompts" >&2
             exit 64
             ;;
     esac
@@ -266,4 +302,5 @@ export OPENCODE_CONFIG_CONTENT="$opencode_config_content"
 if [[ "${1:-}" == "acp" ]]; then
     shift
 fi
+cd "$project_dir"
 exec "$opencode_bin" acp "$@"

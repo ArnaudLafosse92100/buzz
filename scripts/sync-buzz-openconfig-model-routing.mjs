@@ -12,7 +12,11 @@
  * the routes but leaves existing subprocesses untouched.
  */
 
-import { openConfigRoles } from "./lib/buzz-openconfig-manifest.mjs";
+import { buzzRepoRoot, openConfigRoles } from "./lib/buzz-openconfig-manifest.mjs";
+import {
+  buzzOpenConfigProfile,
+  resolveOpenConfigRoles,
+} from "./lib/buzz-openconfig-routing.mjs";
 
 const baseUrl = (process.env.BUZZ_LOCAL_AUTOMATION_URL ?? "http://127.0.0.1:43121").replace(/\/$/, "");
 const token = process.env.BUZZ_LOCAL_AUTOMATION_TOKEN;
@@ -37,12 +41,16 @@ async function request(pathname, options = {}) {
   return body;
 }
 
-const routes = openConfigRoles;
+const routes = await resolveOpenConfigRoles(openConfigRoles, buzzOpenConfigProfile);
 
 function snapshotWithoutRoute(persona) {
   const envVars = { ...(persona.env_vars ?? {}) };
   delete envVars.BUZZ_OPENCONFIG_MODEL;
   delete envVars.BUZZ_OPENCONFIG_VARIANT;
+  delete envVars.BUZZ_OPENCONFIG_PROFILE;
+  delete envVars.BUZZ_OPENCONFIG_ROUTE_SECTION;
+  delete envVars.BUZZ_OPENCONFIG_ROUTE_NAME;
+  delete envVars.BUZZ_OPENCONFIG_PROJECT_DIR;
   return {
     display_name: persona.display_name,
     avatar_url: persona.avatar_url,
@@ -59,9 +67,15 @@ function snapshotWithoutRoute(persona) {
 }
 
 function updatePayload(persona, route) {
-  const envVars = { ...(persona.env_vars ?? {}), BUZZ_OPENCONFIG_MODEL: route.model };
-  if (route.variant === null) delete envVars.BUZZ_OPENCONFIG_VARIANT;
-  else envVars.BUZZ_OPENCONFIG_VARIANT = route.variant;
+  const envVars = {
+    ...(persona.env_vars ?? {}),
+    BUZZ_OPENCONFIG_PROFILE: buzzOpenConfigProfile,
+    BUZZ_OPENCONFIG_ROUTE_SECTION: route.routeSection,
+    BUZZ_OPENCONFIG_ROUTE_NAME: route.routeName,
+    BUZZ_OPENCONFIG_PROJECT_DIR: buzzRepoRoot,
+  };
+  delete envVars.BUZZ_OPENCONFIG_MODEL;
+  delete envVars.BUZZ_OPENCONFIG_VARIANT;
   const body = {
     id: persona.id,
     displayName: persona.display_name,
@@ -105,12 +119,13 @@ for (const route of routes) {
   if (JSON.stringify(snapshotWithoutRoute(result)) !== JSON.stringify(before)) {
     throw new Error(`${route.name}: native route update changed a non-routing field`);
   }
-  if (result.env_vars?.BUZZ_OPENCONFIG_MODEL !== route.model) {
-    throw new Error(`${route.name}: native route update did not persist ${route.model}`);
-  }
-  const actualVariant = result.env_vars?.BUZZ_OPENCONFIG_VARIANT ?? null;
-  if (actualVariant !== route.variant) {
-    throw new Error(`${route.name}: native route update did not persist variant ${route.variant ?? "default"}`);
+  if (result.env_vars?.BUZZ_OPENCONFIG_PROFILE !== buzzOpenConfigProfile
+    || result.env_vars?.BUZZ_OPENCONFIG_ROUTE_SECTION !== route.routeSection
+    || result.env_vars?.BUZZ_OPENCONFIG_ROUTE_NAME !== route.routeName
+    || result.env_vars?.BUZZ_OPENCONFIG_PROJECT_DIR !== buzzRepoRoot
+    || "BUZZ_OPENCONFIG_MODEL" in (result.env_vars ?? {})
+    || "BUZZ_OPENCONFIG_VARIANT" in (result.env_vars ?? {})) {
+    throw new Error(`${route.name}: native logical route did not persist`);
   }
   updated.push({ name: route.name, model: route.model, variant: route.variant, personaId: result.id });
 }
@@ -120,8 +135,12 @@ for (const route of routes) {
   const persona = personas.find((candidate) => candidate.runtime === "buzz-openconfig"
     && candidate.env_vars?.BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE === route.enginePath);
   if (!persona
-    || persona.env_vars?.BUZZ_OPENCONFIG_MODEL !== route.model
-    || (persona.env_vars?.BUZZ_OPENCONFIG_VARIANT ?? null) !== route.variant) {
+    || persona.env_vars?.BUZZ_OPENCONFIG_PROFILE !== buzzOpenConfigProfile
+    || persona.env_vars?.BUZZ_OPENCONFIG_ROUTE_SECTION !== route.routeSection
+    || persona.env_vars?.BUZZ_OPENCONFIG_ROUTE_NAME !== route.routeName
+    || persona.env_vars?.BUZZ_OPENCONFIG_PROJECT_DIR !== buzzRepoRoot
+    || "BUZZ_OPENCONFIG_MODEL" in (persona.env_vars ?? {})
+    || "BUZZ_OPENCONFIG_VARIANT" in (persona.env_vars ?? {})) {
     throw new Error(`${route.name}: final route verification failed`);
   }
 }

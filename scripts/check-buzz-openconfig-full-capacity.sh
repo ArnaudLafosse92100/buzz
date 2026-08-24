@@ -3,18 +3,19 @@
 
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 require_openrouter=false
-live_glm=false
+live_route=false
 
 usage() {
-    echo "usage: $0 [--require-openrouter] [--live-glm]" >&2
+    echo "usage: $0 [--require-openrouter] [--live-route|--live-glm]" >&2
     exit 64
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --require-openrouter) require_openrouter=true ;;
-        --live-glm) live_glm=true; require_openrouter=true ;;
+        --live-route|--live-glm) live_route=true; require_openrouter=true ;;
         *) usage ;;
     esac
     shift
@@ -25,6 +26,8 @@ openconfig_root="${OPENCONFIG_ROOT:-/Volumes/PERSO/OpenConfig}"
 buzz_config="$HOME/.buzz/opencode.json"
 buzz_omo_config="$HOME/.buzz/.opencode/oh-my-openagent.json"
 source_omo_config="$openconfig_root/oh-my-openagent.json"
+normal_config_dir="$("$openconfig_root/oc" profile path normal)"
+normal_omo_config="$normal_config_dir/oh-my-openagent.json"
 
 # Match the ACP adapter: Buzz is launched outside an interactive shell, so
 # provider credentials must be loaded through OpenConfig's allowlist parser.
@@ -37,18 +40,15 @@ for command in jq "$opencode_bin" "$openconfig_root/oc"; do
     [[ -x "$command" || "$(command -v "$command" 2>/dev/null || true)" != "" ]] \
         || { echo "missing required command: $command" >&2; exit 69; }
 done
-for file in "$buzz_config" "$buzz_omo_config" "$source_omo_config"; do
+for file in "$buzz_config" "$buzz_omo_config" "$source_omo_config" "$normal_omo_config"; do
     [[ -r "$file" ]] || { echo "missing required configuration: $file" >&2; exit 66; }
     jq -e . "$file" >/dev/null
 done
 
-# Buzz must delegate to the source OpenConfig topology rather than carrying a
-# truncated local copy of the agent/category/team definitions.
+# Buzz's fallback config owns provider connectivity only. Persona model routing
+# is resolved from OpenConfig's named `normal` profile by the ACP adapter.
 jq -e '
-  .model == "openrouter/z-ai/glm-5.2-exacto"
-  and .small_model == "openrouter/deepseek/deepseek-v4-flash"
-  and .default_agent == "sisyphus"
-  and (.enabled_providers | index("openrouter"))
+  (.enabled_providers | index("openrouter"))
   and (.enabled_providers | index("subscription-gateway"))
   and ((.enabled_providers | index("openai")) | not)
   and (.provider["subscription-gateway"].models["gpt-5.6-sol"].id == "llm-agent-planning")
@@ -76,6 +76,8 @@ for name in "${expected_agents[@]}"; do
     jq -e --arg name "$name" '.agents[$name] != null' "$source_omo_config" >/dev/null \
         || { echo "OpenConfig agent missing: $name" >&2; exit 1; }
 done
+
+node "$repo_root/scripts/test-buzz-openconfig-manifest.mjs"
 for name in "${expected_categories[@]}"; do
     jq -e --arg name "$name" '.categories[$name] != null' "$source_omo_config" >/dev/null \
         || { echo "OpenConfig category missing: $name" >&2; exit 1; }
@@ -95,13 +97,14 @@ if ! /usr/bin/grep -q 'OpenRouter' <<<"$providers"; then
 fi
 
 echo "OpenRouter credential detected."
-if [[ "$live_glm" == true ]]; then
+if [[ "$live_route" == true ]]; then
+    sisyphus_model="$("$openconfig_root/oc" profile resolve normal agents sisyphus | jq -r .model)"
     output="$(
         cd "$HOME/.buzz"
-        "$opencode_bin" run --model openrouter/z-ai/glm-5.2-exacto \
-            'Reply with exactly: GLM_OPENROUTER_OK' 2>&1
+        OPENCODE_CONFIG_DIR="$normal_config_dir" "$opencode_bin" run --model "$sisyphus_model" \
+            'Reply with exactly: OPENCONFIG_NORMAL_OK' 2>&1
     )" || { echo "$output" >&2; exit 1; }
-    /usr/bin/grep -q 'GLM_OPENROUTER_OK' <<<"$output" \
-        || { echo "GLM did not return the expected readiness marker." >&2; exit 1; }
-    echo "Live GLM through OpenRouter is ready."
+    /usr/bin/grep -q 'OPENCONFIG_NORMAL_OK' <<<"$output" \
+        || { echo "The resolved normal Sisyphus route did not return the expected marker." >&2; exit 1; }
+    echo "Live OpenConfig normal Sisyphus route is ready ($sisyphus_model)."
 fi

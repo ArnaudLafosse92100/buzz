@@ -6,9 +6,11 @@
  */
 
 import {
+  buzzRepoRoot,
   openConfigRoles,
   openConfigTeams,
 } from "./lib/buzz-openconfig-manifest.mjs";
+import { buzzOpenConfigProfile } from "./lib/buzz-openconfig-routing.mjs";
 import { legacyTeamNames } from "./lib/buzz-openconfig-legacy-identities.mjs";
 import { installPersonaPrompt } from "./lib/buzz-openconfig-persona-prompts.mjs";
 
@@ -90,6 +92,10 @@ function functionalSnapshot(persona) {
   for (const key of [
     "BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE",
     "BUZZ_OPENCONFIG_MODEL",
+    "BUZZ_OPENCONFIG_PROFILE",
+    "BUZZ_OPENCONFIG_ROUTE_SECTION",
+    "BUZZ_OPENCONFIG_ROUTE_NAME",
+    "BUZZ_OPENCONFIG_PROJECT_DIR",
     "BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE",
     "BUZZ_OPENCONFIG_PUBLIC_NAME",
     "BUZZ_OPENCONFIG_AGENT_NAME",
@@ -114,13 +120,16 @@ function canonicalPersonaPayload(persona, spec, systemPrompt) {
   const envVars = {
     ...(persona.env_vars ?? {}),
     BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE: spec.enginePath,
-    BUZZ_OPENCONFIG_MODEL: spec.model,
+    BUZZ_OPENCONFIG_PROFILE: buzzOpenConfigProfile,
+    BUZZ_OPENCONFIG_ROUTE_SECTION: spec.routeSection,
+    BUZZ_OPENCONFIG_ROUTE_NAME: spec.routeName,
+    BUZZ_OPENCONFIG_PROJECT_DIR: buzzRepoRoot,
     BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE: spec.personaPath,
     BUZZ_OPENCONFIG_PUBLIC_NAME: spec.name,
     BUZZ_OPENCONFIG_AGENT_NAME: spec.slug,
   };
-  if (spec.variant === null) delete envVars.BUZZ_OPENCONFIG_VARIANT;
-  else envVars.BUZZ_OPENCONFIG_VARIANT = spec.variant;
+  delete envVars.BUZZ_OPENCONFIG_MODEL;
+  delete envVars.BUZZ_OPENCONFIG_VARIANT;
   return {
     id: persona.id,
     displayName: spec.displayName,
@@ -159,12 +168,14 @@ async function ensurePersona(spec, personas) {
 
   const envVars = {
     BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE: spec.enginePath,
-    BUZZ_OPENCONFIG_MODEL: spec.model,
+    BUZZ_OPENCONFIG_PROFILE: buzzOpenConfigProfile,
+    BUZZ_OPENCONFIG_ROUTE_SECTION: spec.routeSection,
+    BUZZ_OPENCONFIG_ROUTE_NAME: spec.routeName,
+    BUZZ_OPENCONFIG_PROJECT_DIR: buzzRepoRoot,
     BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE: spec.personaPath,
     BUZZ_OPENCONFIG_PUBLIC_NAME: spec.name,
     BUZZ_OPENCONFIG_AGENT_NAME: spec.slug,
   };
-  if (spec.variant !== null) envVars.BUZZ_OPENCONFIG_VARIANT = spec.variant;
 
   const response = await request("/v1/personas-with-agent", {
     method: "POST",
@@ -275,8 +286,12 @@ for (const role of openConfigRoles) {
     || actual.system_prompt !== expectedPrompt
     || actual.env_vars?.BUZZ_OPENCONFIG_PUBLIC_NAME !== role.name
     || actual.env_vars?.BUZZ_OPENCONFIG_AGENT_NAME !== role.slug
-    || actual.env_vars?.BUZZ_OPENCONFIG_MODEL !== role.model
-    || (actual.env_vars?.BUZZ_OPENCONFIG_VARIANT ?? null) !== role.variant) {
+    || actual.env_vars?.BUZZ_OPENCONFIG_PROFILE !== buzzOpenConfigProfile
+    || actual.env_vars?.BUZZ_OPENCONFIG_ROUTE_SECTION !== role.routeSection
+    || actual.env_vars?.BUZZ_OPENCONFIG_ROUTE_NAME !== role.routeName
+    || actual.env_vars?.BUZZ_OPENCONFIG_PROJECT_DIR !== buzzRepoRoot
+    || "BUZZ_OPENCONFIG_MODEL" in (actual.env_vars ?? {})
+    || "BUZZ_OPENCONFIG_VARIANT" in (actual.env_vars ?? {})) {
     throw new Error(`${role.name}: final canonical persona verification failed`);
   }
   finalPersonasByRole.set(role.name, matches[0]);

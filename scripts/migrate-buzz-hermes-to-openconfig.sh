@@ -95,13 +95,16 @@ check_state() {
     expected="$(active_target_ids | wc -l | tr -d ' ')"
     migrated="$(jq '[.[] | select(.pubkey != "" and .start_on_app_launch == true and .runtime == "buzz-openconfig")] | length' "$agents_store")"
     prompts="$(find "$persona_root" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
-    routed="$(jq '[.[]
+    routed="$(jq --arg repo "$repo_root" '[.[]
       | select(.pubkey == "" and .runtime == "buzz-openconfig")
-      | select(.env_vars.BUZZ_OPENCONFIG_MODEL? | test("^(subscription-gateway|openrouter)/"))
+      | select(.env_vars.BUZZ_OPENCONFIG_PROFILE == "normal")
+      | select(.env_vars.BUZZ_OPENCONFIG_ROUTE_SECTION? | test("^(agents|categories)$"))
+      | select(.env_vars.BUZZ_OPENCONFIG_ROUTE_NAME? | type == "string")
+      | select(.env_vars.BUZZ_OPENCONFIG_PROJECT_DIR == $repo)
+      | select((.env_vars | has("BUZZ_OPENCONFIG_MODEL")) | not)
+      | select((.env_vars | has("BUZZ_OPENCONFIG_VARIANT")) | not)
     ] | length' "$agents_store")"
-    expected_routes="$(manifest_json | jq 'map({(.name): .model}) | add')"
-    local expected_variants
-    expected_variants="$(manifest_json | jq 'map({(.name): .variant}) | add')"
+    expected_routes="$(manifest_json | jq 'map({(.name): {section: .routeSection, name: .routeName}}) | add')"
 
     jq -e '.preferred_runtime == "buzz-openconfig"' "$global_config" >/dev/null \
         || die "preferred runtime is not buzz-openconfig"
@@ -119,17 +122,10 @@ check_state() {
     jq -e --argjson expected_routes "$expected_routes" '
       [ .[]
         | select(.pubkey == "" and .runtime == "buzz-openconfig")
-        | {(.name): .env_vars.BUZZ_OPENCONFIG_MODEL}
+        | {(.name): {section: .env_vars.BUZZ_OPENCONFIG_ROUTE_SECTION, name: .env_vars.BUZZ_OPENCONFIG_ROUTE_NAME}}
       ] | add == $expected_routes
     ' "$agents_store" >/dev/null \
-        || die "Buzz persona model routes differ from the OpenConfig mapping"
-    jq -e --argjson expected_variants "$expected_variants" '
-      [ .[]
-        | select(.pubkey == "" and .runtime == "buzz-openconfig")
-        | {(.name): (.env_vars.BUZZ_OPENCONFIG_VARIANT // null)}
-      ] | add == $expected_variants
-    ' "$agents_store" >/dev/null \
-        || die "Buzz persona variants differ from the OpenConfig mapping"
+        || die "Buzz persona logical routes differ from the OpenConfig mapping"
 
     echo "OpenConfig migration healthy: agents=$migrated prompts=$prompts routes=$routed"
 }
@@ -230,18 +226,16 @@ apply_migration() {
           | .name = $role.name
           | if .pubkey == "" then
             .runtime = "buzz-openconfig"
-            | .env_vars = (((.env_vars // {}) | del(.HERMES_HOME)) + {
+            | .env_vars = (((.env_vars // {}) | del(.HERMES_HOME, .BUZZ_OPENCONFIG_MODEL, .BUZZ_OPENCONFIG_VARIANT)) + {
                 "BUZZ_OPENCONFIG_PERSONA_PROMPT_FILE": ($persona_root + "/" + .slug + ".md"),
-                "BUZZ_OPENCONFIG_MODEL": $role.model,
+                "BUZZ_OPENCONFIG_PROFILE": "normal",
+                "BUZZ_OPENCONFIG_ROUTE_SECTION": $role.routeSection,
+                "BUZZ_OPENCONFIG_ROUTE_NAME": $role.routeName,
+                "BUZZ_OPENCONFIG_PROJECT_DIR": $repo_root,
                 "BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE": $role.enginePath,
                 "BUZZ_OPENCONFIG_PUBLIC_NAME": $role.name,
                 "BUZZ_OPENCONFIG_AGENT_NAME": $role.slug
               })
-            | if $role.variant == null then
-                del(.env_vars.BUZZ_OPENCONFIG_VARIANT)
-              else
-                .env_vars.BUZZ_OPENCONFIG_VARIANT = $role.variant
-              end
           else
             .runtime = "buzz-openconfig"
             | .agent_command = $adapter
@@ -251,7 +245,7 @@ apply_migration() {
         else .
         end
       )
-    ' --argjson targets "$targets_json" --argjson roles "$roles_json" --argjson aliases "$legacy_identities_json" --arg persona_root "$persona_root" --arg adapter "$adapter_install"
+    ' --argjson targets "$targets_json" --argjson roles "$roles_json" --argjson aliases "$legacy_identities_json" --arg persona_root "$persona_root" --arg adapter "$adapter_install" --arg repo_root "$repo_root"
 
     atomic_jq "$global_config" '.preferred_runtime = "buzz-openconfig"'
 
@@ -264,6 +258,45 @@ apply_migration() {
 
     check_state
     echo "Backup: $backup_dir"
+}
+
+refresh_routes() {
+    require_file "$agents_store"
+    require_file "$manifest_module"
+    command -v jq >/dev/null 2>&1 || die "jq is required"
+    if [[ "${BUZZ_OPENCONFIG_ALLOW_RUNNING:-0}" != "1" ]] \
+        && pgrep -f '/Applications/Buzz.app/Contents/MacOS/buzz-desktop' >/dev/null 2>&1; then
+        die "Buzz is running; quit it before refreshing routes"
+    fi
+
+    local stamp backup_dir roles_json
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup_dir="$backup_root/$stamp"
+    mkdir -p "$backup_dir"
+    cp -p "$agents_store" "$backup_dir/managed-agents.json"
+    printf '%s\n' "$backup_dir" >"$backup_root/latest"
+    roles_json="$(manifest_json)"
+
+    # shellcheck disable=SC2016 # jq program; variables are jq variables.
+    atomic_jq "$agents_store" '
+      ($roles | map({key: .enginePath, value: .}) | from_entries) as $by_engine
+      | map(
+          if .pubkey == "" and .runtime == "buzz-openconfig"
+             and ($by_engine[.env_vars.BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE] != null)
+          then
+            ($by_engine[.env_vars.BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE]) as $role
+            | .env_vars = (((.env_vars // {}) | del(.BUZZ_OPENCONFIG_MODEL, .BUZZ_OPENCONFIG_VARIANT)) + {
+                "BUZZ_OPENCONFIG_PROFILE": "normal",
+                "BUZZ_OPENCONFIG_ROUTE_SECTION": $role.routeSection,
+                "BUZZ_OPENCONFIG_ROUTE_NAME": $role.routeName,
+                "BUZZ_OPENCONFIG_PROJECT_DIR": $repo_root
+              })
+          else . end
+        )
+    ' --argjson roles "$roles_json" --arg repo_root "$repo_root"
+
+    check_state
+    echo "Refreshed logical OpenConfig routes. Backup: $backup_dir"
 }
 
 rollback_migration() {
@@ -285,7 +318,8 @@ rollback_migration() {
 
 case "$action" in
     apply) apply_migration ;;
+    refresh) refresh_routes ;;
     check) check_state ;;
     rollback) rollback_migration "$@" ;;
-    *) die "usage: $0 {apply|check|rollback [backup-dir]}" ;;
+    *) die "usage: $0 {apply|refresh|check|rollback [backup-dir]}" ;;
 esac
