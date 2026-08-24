@@ -595,20 +595,15 @@ usage.
 
 ---
 
-## Graphify
+## CodeGraph
 
-Graphify is a local derived index for architecture navigation and impact
-analysis. Current source and authenticated operational evidence remain the
-authorities. Never treat the graph as proof of relay/database state, Nostr
-authorization, deployment, CI, Block-internal repositories, signing identity,
-secrets, or CRM/Buzz production integration status.
-
-Use only the exact isolated Graphify version declared in
-`docs/graphify-workflow.md`. Routine updates are directed, clustered, local
-code-only AST extraction. Do not automatically enable semantic/LLM extraction,
-MCP, a global graph, URL ingestion, wiki/Obsidian export, or CI. Work memory is
-enabled only in the documented external runtime directory; it is advisory and
-fingerprinted against the current source.
+CodeGraph is the sole local code-navigation and impact-analysis engine. OmO
+owns its pin, provisioning, MCP bridge and synchronization; do not add a
+project watcher or run the native installer/upgrader. Current source and
+authenticated operational evidence remain authoritative. Never treat the
+derived index as proof of relay/database state, Nostr authorization,
+deployment, CI, Block-internal repositories, signing identity, secrets, or
+CRM/Buzz production integration status.
 
 Use `query`, `path`, `affected`, and `explain` to discover likely code paths,
 then verify every material claim in current source and, when relevant, live
