@@ -643,3 +643,23 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+---
+
+## CodeGraph
+
+CodeGraph is the sole local code-navigation and impact-analysis engine. OmO
+owns its pin, provisioning, MCP bridge and synchronization; do not add a
+project watcher or run the native installer/upgrader. Current source and
+authenticated operational evidence remain authoritative. Never treat the
+derived index as proof of relay/database state, Nostr authorization,
+deployment, CI, Block-internal repositories, signing identity, secrets, or
+CRM/Buzz production integration status.
+
+Use `query`, `path`, `affected`, and `explain` to discover likely code paths,
+then verify every material claim in current source and, when relevant, live
+systems. YAML, documentation, public/static assets, generated outputs, Hermit
+state, and external ecosystem repositories are outside the automatic graph and
+must be checked directly when authoritative.
+AGENTS.md is durable policy rather than live status; verify every dated,
+deployed, signed, authorized, or integrated claim from its current source.
+File age or a recent Markdown edit is not proof that mutable state is current.
