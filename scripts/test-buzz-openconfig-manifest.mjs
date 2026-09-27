@@ -117,8 +117,8 @@ for (const role of resolvedRoles) {
   }
 }
 const resolvedByName = new Map(resolvedRoles.map((role) => [role.name, role]));
-if (resolvedByName.get("Sisyphus")?.model !== "openrouter/z-ai/glm-5.3") {
-  failures.push("Sisyphus must inherit GLM 5.3 from OpenConfig normal");
+if (resolvedByName.get("Sisyphus")?.model !== "codex-subscription/gpt-6-astra") {
+  failures.push("Sisyphus must inherit Astra 6 via the Codex subscription from OpenConfig normal");
 }
 if (resolvedByName.get("Sisyphus Junior")?.model !== "openrouter/deepseek/deepseek-v4-flash-0731") {
   failures.push("Sisyphus Junior must inherit exact DeepSeek Flash 0731 from OpenConfig normal");

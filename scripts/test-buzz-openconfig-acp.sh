@@ -44,7 +44,7 @@ elif [[ "$1 $2" == "profile xdg-path" ]]; then
 elif [[ "$1 $2" == "profile resolve" ]]; then
   profile="$3" section="$4" name="$5"
   case "$name" in
-    sisyphus) model='openrouter/z-ai/glm-5.3' ;;
+    sisyphus) model='codex-subscription/gpt-6-astra' ;;
     multimodal-looker) model='openrouter/google/gemini-3.1-pro-preview' ;;
     *) exit 2 ;;
   esac
@@ -114,10 +114,10 @@ jq -e '
   .args == "acp --log-level WARN"
   and .config.share == "disabled"
   and .config.default_agent == "sisyphus"
-  and .config.model == "openrouter/z-ai/glm-5.3"
+  and .config.model == "codex-subscription/gpt-6-astra"
   and .config.agent.existing.mode == "subagent"
   and .config.agent.sisyphus.mode == "primary"
-  and .config.agent.sisyphus.model == "openrouter/z-ai/glm-5.3"
+  and .config.agent.sisyphus.model == "codex-subscription/gpt-6-astra"
   and .config.agent.sisyphus.variant == "low"
   and .openrouter_key_present == true
   and .gateway_key_present == true
