@@ -1,9 +1,16 @@
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const buzzRepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const openConfigRoot = "/Volumes/PERSO/OpenConfig";
-export const engineRoot = `${openConfigRoot}/prompts`;
+// The installed OpenConfig directory the ACP wrapper validates against
+// (`BUZZ_OPENCONFIG_CONFIG_DIR` default in scripts/buzz-openconfig-acp.sh). It
+// is a symlink to the active compat generation, so engine prompts referenced
+// through it follow generation switches; the wrapper rejects any engine prompt
+// whose resolved path is outside that generation's prompts directory.
+export const openConfigConfigDir = path.join(os.homedir(), ".config", "opencode");
+export const engineRoot = `${openConfigConfigDir}/prompts`;
 export const personaRoot = "/Users/arnaud/.buzz/.opencode/personas";
 export const personaSourceRoot = `${buzzRepoRoot}/scripts/config/buzz-openconfig-personas`;
 

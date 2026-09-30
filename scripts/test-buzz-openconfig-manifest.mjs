@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /** Static contract tests for the canonical Buzz/OpenConfig manifest. */
 
-import { access } from "node:fs/promises";
+import { access, realpath } from "node:fs/promises";
+import path from "node:path";
 import {
   openConfigBehaviorPayload,
+  openConfigConfigDir,
   openConfigRoles,
   openConfigSessionPolicy,
   openConfigTeams,
@@ -41,6 +43,18 @@ for (const role of openConfigRoles) {
   if (role.acpPort < 1024 || role.acpPort > 65535) failures.push(`${role.name}: invalid ACP port`);
   for (const file of [role.enginePath, role.personaSource]) {
     await access(file).catch(() => failures.push(`${role.name}: missing ${file}`));
+  }
+}
+
+// Mirror the ACP wrapper guard: an engine prompt must resolve inside the
+// resolved OpenConfig directory's prompts tree, or every agent fails to start.
+const resolvedPromptRoot = `${await realpath(openConfigConfigDir)}/prompts/`;
+for (const role of openConfigRoles) {
+  const resolvedEngine = await realpath(path.dirname(role.enginePath))
+    .then((dir) => `${dir}/${path.basename(role.enginePath)}`)
+    .catch(() => null);
+  if (!resolvedEngine?.startsWith(resolvedPromptRoot)) {
+    failures.push(`${role.name}: engine prompt ${role.enginePath} is outside ${resolvedPromptRoot}`);
   }
 }
 
