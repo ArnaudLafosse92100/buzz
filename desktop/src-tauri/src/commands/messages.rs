@@ -911,7 +911,7 @@ pub async fn remove_reaction(
 
     let reaction_event = reactions
         .iter()
-        .find(|ev| ev.content.trim() == trimmed_emoji)
+        .find(|ev| events::crm_edit_reaction::matches(ev, trimmed_emoji))
         .ok_or("could not find your reaction event for this emoji")?;
 
     let builder = events::build_remove_reaction(reaction_event.id)?;

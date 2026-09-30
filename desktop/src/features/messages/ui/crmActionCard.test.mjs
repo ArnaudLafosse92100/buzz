@@ -317,3 +317,36 @@ test("rejects malformed or unsupported markers", () => {
     null,
   );
 });
+test("follow-up choice preserves sparse indices and delimiter-bearing subjects", () => {
+  const options = [
+    { reaction: "0️⃣", label: "Classic; subject" },
+    { reaction: "3️⃣", label: "We need this | now; really" },
+  ];
+  const card = parseCrmActionCard(
+    [
+      "Choose a subject",
+      `crm-action-options:v1:followup_quote_select:${JSON.stringify(options)}`,
+      "crm-action:v1:11111111-1111-4111-8111-111111111111:followup_quote_select:2099-01-01T00:00:00Z",
+    ].join("\n"),
+  );
+  assert.deepEqual(card.quoteChoices, options);
+  assert.equal(card.content, "Choose a subject");
+  assert.equal(isCrmActionControlReaction(card, "0️⃣"), true);
+});
+
+test("malformed follow-up choices fail closed rather than partially selecting", () => {
+  for (const choices of [
+    [],
+    [{ reaction: "1️⃣", label: "Missing generic" }],
+    [
+      { reaction: "0️⃣", label: "Good" },
+      { reaction: "4️⃣", label: "Bad" },
+    ],
+    [{ reaction: "0️⃣", label: "Header\ninjection" }],
+  ]) {
+    const card = parseCrmActionCard(
+      `crm-action-options:v1:followup_quote_select:${JSON.stringify(choices)}\ncrm-action:v1:11111111-1111-4111-8111-111111111111:followup_quote_select:2099-01-01T00:00:00Z`,
+    );
+    assert.deepEqual(card.quoteChoices, []);
+  }
+});

@@ -402,6 +402,7 @@ export const MessageRow = React.memo(
     const crmActionCardNode = crmActionCard ? (
       <CrmActionCard
         action={crmActionCard}
+        result={message.crmOutreachResult}
         canToggle={canToggleReactions}
         onChooseLeadControl={handleExclusiveReactionChoice}
         onSelect={handleReactionSelect}
@@ -859,6 +860,10 @@ export const MessageRow = React.memo(
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&
     prev.message.edited === next.message.edited &&
+    prev.message.crmOutreachResult?.eventId ===
+      next.message.crmOutreachResult?.eventId &&
+    prev.message.crmOutreachResult?.editPayload ===
+      next.message.crmOutreachResult?.editPayload &&
     // Value comparisons, not identity: these arrays are rebuilt with fresh
     // identities on every ingest/refetch even when unchanged — identity
     // checks made every row re-render on every streamed event in an open

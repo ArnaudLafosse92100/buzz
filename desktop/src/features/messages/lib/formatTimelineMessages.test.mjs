@@ -41,6 +41,30 @@ function streamMessage(overrides = {}) {
   };
 }
 
+test("CRM edit tags round-trip through the actual timeline reaction projection", () => {
+  const payload = `crm-action-edit:v1:revision-2:${Buffer.from("Bonjour Arnaud. ".repeat(30)).toString("base64url")}`;
+  const reaction = {
+    id: HEX64_B,
+    pubkey: PUBKEY_A,
+    kind: 7,
+    created_at: 1_700_000_001,
+    content: "crm-edit:revision-2",
+    sig: "sig",
+    tags: [
+      ["e", HEX64_A],
+      ["crm-edit", payload],
+    ],
+  };
+  const result = formatTimelineMessages(
+    [streamMessage(), reaction],
+    null,
+    PUBKEY_A,
+    null,
+  );
+  assert.equal(result[0].reactions[0].emoji, payload);
+  assert.equal(result[0].reactions[0].reactedByCurrentUser, true);
+});
+
 function deletionEvent(kind, targetId, overrides = {}) {
   return {
     id: HEX64_B,

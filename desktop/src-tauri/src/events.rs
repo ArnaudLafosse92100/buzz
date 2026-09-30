@@ -13,6 +13,8 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+pub(crate) mod crm_edit_reaction;
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -442,16 +444,7 @@ pub fn build_delete_compat(
 
 // ── Reactions ────────────────────────────────────────────────────────────────
 
-/// Kind 7 — NIP-25 reaction.
-pub fn build_reaction(target_event_id: EventId, emoji: &str) -> Result<EventBuilder, String> {
-    if emoji.chars().count() > MAX_EMOJI_CHARS {
-        return Err(format!(
-            "emoji exceeds maximum length of {MAX_EMOJI_CHARS} characters"
-        ));
-    }
-    let tags = vec![tag(vec!["e", &target_event_id.to_hex()])?];
-    Ok(EventBuilder::new(Kind::Custom(7), emoji).tags(tags))
-}
+pub use crm_edit_reaction::build_reaction;
 
 /// Kind 5 — delete a reaction event.
 pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder, String> {

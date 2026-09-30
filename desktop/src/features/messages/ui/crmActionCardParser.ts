@@ -4,11 +4,13 @@ export type CrmActionCard = {
     | "reddit_mark_posted"
     | "lead_categorize"
     | "outreach_approve"
+    | "followup_quote_select"
     | "calendar_book"
     | "lead_control";
   expiresAt: string;
   content: string;
   calendarSlots?: CrmCalendarSlot[];
+  quoteChoices?: CrmCalendarSlot[];
   leadControlChoices?: string[];
   outreachDraft?: string;
 };
@@ -22,19 +24,22 @@ const CONTROL_REACTIONS: Record<
   reddit_mark_posted: ["✅", "❌"],
   lead_categorize: ["👍", "📅", "ℹ️", "👎", "🕒", "⛔", "🔀", "❌"],
   outreach_approve: ["✅", "❌", "✏️"],
+  followup_quote_select: ["0️⃣", "1️⃣", "2️⃣", "3️⃣", "❌"],
   calendar_book: ["1️⃣", "2️⃣", "3️⃣", "❌"],
   lead_control: ["⛔", "🏢", "🗑️", "✅"],
 };
 const OUTREACH_EDIT_PREFIX = "crm-action-edit:v1:";
 
 const MARKER =
-  /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book|lead_control):(\S+)\s*$/i;
+  /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|followup_quote_select|calendar_book|lead_control):(\S+)\s*$/i;
 const REDDIT_DRAFT =
   /(?:^|\n)Draft to copy manually:\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
 const CALENDAR_SLOT = /^\*\*Slot ([1-3]):\*\*\s*(.+)$/gim;
 const LEAD_CONTROL_OPTIONS =
   /(?:^|\n)crm-action-options:v1:lead_control:([^\n]+)\s*(?=\n|$)/i;
 const LEAD_CONTROL_REACTIONS = new Set(["⛔", "🏢", "🗑️"]);
+const QUOTE_OPTIONS =
+  /(?:^|\n)crm-action-options:v1:followup_quote_select:(\[[^\n]+\])\s*(?=\n|$)/i;
 const OUTREACH_DRAFT =
   /(?:^|\n)## Draft\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
 const ACTION_HEADER =
@@ -46,6 +51,8 @@ const ACTION_FOOTERS: Record<CrmActionCard["actionType"], RegExp> = {
     /\n*Choose a lead category using the action card\.\nThe selected category will be recorded and queued for SmartLead synchronization\.\nExpires: [^\n]+\s*$/i,
   outreach_approve:
     /\n*Approve to send this frozen draft, or reject it\.\nExpires: [^\n]+\s*$/i,
+  followup_quote_select:
+    /\n*Choose a frozen subject\. This only submits a choice; separate approval is required before any send\.\nExpires: [^\n]+\s*$/i,
   calendar_book:
     /\n*Choose a meeting slot using the action card\.\nExpires: [^\n]+\s*$/i,
   lead_control:
@@ -60,6 +67,7 @@ function readableContent(
     .replace(ACTION_HEADER, "")
     .replace(ACTION_FOOTERS[actionType], "")
     .replace(LEAD_CONTROL_OPTIONS, "")
+    .replace(QUOTE_OPTIONS, "")
     .replace(actionType === "outreach_approve" ? OUTREACH_DRAFT : /$^/, "");
 
   return (
@@ -99,6 +107,9 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
       action.leadControlChoices = choices;
     }
   }
+  if (action.actionType === "followup_quote_select") {
+    action.quoteChoices = extractCrmQuoteChoices(body);
+  }
   if (action.actionType === "outreach_approve") {
     action.outreachDraft = extractCrmOutreachDraft(body.slice(0, match.index));
   }
@@ -121,6 +132,40 @@ export function isCrmActionControlReaction(
 
 export function extractCrmOutreachDraft(content: string): string {
   return OUTREACH_DRAFT.exec(content)?.[2] ?? "";
+}
+
+export function extractCrmQuoteChoices(content: string): CrmCalendarSlot[] {
+  const raw = QUOTE_OPTIONS.exec(content)?.[1] ?? "";
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 4)
+      return [];
+    const allowed = ["0️⃣", "1️⃣", "2️⃣", "3️⃣"];
+    const seen = new Set<string>();
+    const choices: CrmCalendarSlot[] = [];
+    for (const item of parsed) {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof item.reaction !== "string" ||
+        !allowed.includes(item.reaction) ||
+        typeof (item as { label?: unknown }).label !== "string" ||
+        !(item as { label: string }).label.trim() ||
+        item.label.length > (item.reaction === "0️⃣" ? 200 : 100) ||
+        [...item.label].some((char) => {
+          const code = char.charCodeAt(0);
+          return code <= 31 || code === 127;
+        }) ||
+        seen.has(item.reaction)
+      )
+        return [];
+      seen.add(item.reaction);
+      choices.push({ reaction: item.reaction, label: item.label });
+    }
+    return choices[0]?.reaction === "0️⃣" ? choices : [];
+  } catch {
+    return [];
+  }
 }
 
 export function encodeCrmOutreachEdit(

@@ -2,6 +2,7 @@ import * as React from "react";
 import {
   Building2,
   Check,
+  Clock3,
   Copy,
   Pencil,
   ShieldBan,
@@ -10,6 +11,8 @@ import {
 } from "lucide-react";
 
 import type { TimelineReaction } from "@/features/messages/types";
+import type { CrmOutreachResult } from "../lib/crmOutreachResult";
+import { crmOutreachStatus } from "./crmOutreachStatus";
 import {
   decodeCrmOutreachEdit,
   encodeCrmOutreachEdit,
@@ -46,11 +49,8 @@ const LEAD_CONTROL_CHOICES = [
 ] as const;
 const CALENDAR_SLOT_REACTIONS = new Set(["1️⃣", "2️⃣", "3️⃣"]);
 
-function isFinalDecisionReaction(
-  actionType: CrmAction["actionType"],
-  emoji: string,
-): boolean {
-  switch (actionType) {
+function isFinalDecisionReaction(action: CrmAction, emoji: string): boolean {
+  switch (action.actionType) {
     case "reddit_mark_posted":
       return emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI;
     case "lead_categorize":
@@ -60,6 +60,11 @@ function isFinalDecisionReaction(
       );
     case "outreach_approve":
       return emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI;
+    case "followup_quote_select":
+      return (
+        emoji === CANCEL_EMOJI ||
+        (action.quoteChoices ?? []).some((choice) => choice.reaction === emoji)
+      );
     case "calendar_book":
       return emoji === CANCEL_EMOJI || CALENDAR_SLOT_REACTIONS.has(emoji);
     case "lead_control":
@@ -72,6 +77,7 @@ export function CrmActionCard({
   canToggle,
   pending,
   reactions,
+  result,
   onSelect,
   onChooseLeadControl,
 }: {
@@ -79,6 +85,7 @@ export function CrmActionCard({
   canToggle: boolean;
   pending: boolean;
   reactions: TimelineReaction[];
+  result?: CrmOutreachResult;
   onSelect: (emoji: string) => Promise<void>;
   onChooseLeadControl: (
     choices: readonly string[],
@@ -91,12 +98,16 @@ export function CrmActionCard({
   const [editOpen, setEditOpen] = React.useState(false);
   const [editBody, setEditBody] = React.useState("");
   const [editError, setEditError] = React.useState<string | null>(null);
+  const [decisionPending, setDecisionPending] = React.useState<string | null>(
+    null,
+  );
+  const [decisionError, setDecisionError] = React.useState<string | null>(null);
   const expiresAt = Date.parse(action.expiresAt);
   const expired = !Number.isFinite(expiresAt) || Date.now() >= expiresAt;
   const decided = reactions.some(
     (reaction) =>
       reaction.reactedByCurrentUser &&
-      isFinalDecisionReaction(action.actionType, reaction.emoji),
+      isFinalDecisionReaction(action, reaction.emoji),
   );
   const disabled = !canToggle || pending || expired || decided;
   const redditDraft =
@@ -273,7 +284,116 @@ export function CrmActionCard({
     );
   }
 
+  if (action.actionType === "followup_quote_select") {
+    const choices = action.quoteChoices ?? [];
+    const submitted = decided || selectedReaction !== null;
+    const locked = disabled || decisionPending !== null || submitted;
+    const choose = async (reaction: string) => {
+      if (locked) return;
+      setDecisionPending(reaction);
+      setDecisionError(null);
+      try {
+        await onSelect(reaction);
+        setSelectedReaction(reaction);
+      } catch {
+        setDecisionError(
+          "Buzz could not submit your choice. Check your connection and try again.",
+        );
+      } finally {
+        setDecisionPending(null);
+      }
+    };
+    return (
+      <div
+        className="my-2 max-w-xl rounded-lg border border-input/50 bg-muted/20 p-3"
+        data-testid="crm-followup-quote-select"
+      >
+        <p className="text-sm font-medium">Choose follow-up subject</p>
+        <p role="status" className="mt-1 text-sm text-muted-foreground">
+          {submitted
+            ? "Choice submitted. Wait for CRM confirmation and the separate draft approval. Nothing has been sent by this step."
+            : expired
+              ? "This choice has expired. No email was sent by this step."
+              : decisionPending
+                ? "Submitting your choice…"
+                : "Choose the classic subject or a prospect quote. You will review the full email before sending."}
+        </p>
+        {decisionError ? (
+          <p role="alert" className="mt-2 text-sm">
+            {decisionError}
+          </p>
+        ) : null}
+        {!choices.length ? (
+          <p role="alert" className="mt-2 text-sm">
+            Subject choices are unavailable. Ask the CRM operator to check this
+            card.
+          </p>
+        ) : null}
+        <div className="mt-3 flex flex-col gap-2">
+          {choices.map((choice) => (
+            <Button
+              className="h-auto min-h-9 justify-start whitespace-normal break-words py-2 text-left"
+              disabled={locked}
+              key={choice.reaction}
+              onClick={() => void choose(choice.reaction)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <span className="min-w-0">
+                <span className="block text-xs text-muted-foreground">
+                  {choice.reaction === "0️⃣"
+                    ? "Classic subject"
+                    : "Prospect quote"}
+                </span>
+                {choice.label}
+              </span>
+            </Button>
+          ))}
+        </div>
+        <div className="mt-3">
+          <Button
+            disabled={locked}
+            onClick={() => void choose(CANCEL_EMOJI)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <X aria-hidden="true" />
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   if (action.actionType === "outreach_approve") {
+    const status = crmOutreachStatus(
+      reactions,
+      result,
+      expired,
+      decisionPending,
+    );
+    const StatusIcon =
+      status.state === "rejected"
+        ? X
+        : ["edited", "sent"].includes(status.state)
+          ? Check
+          : Clock3;
+    const chooseDecision = async (emoji: string) => {
+      if (disabled || status.locked) return;
+      setDecisionPending(emoji);
+      setDecisionError(null);
+      try {
+        await onSelect(emoji);
+      } catch {
+        setDecisionError(
+          "Buzz could not submit your action. Check your connection and try again.",
+        );
+      } finally {
+        setDecisionPending(null);
+      }
+    };
     const unchanged = editBody.trim() === outreachDraft.trim();
     const invalidEdit = editBody.trim().length < 5 || editBody.length > 12_000;
 
@@ -284,7 +404,7 @@ export function CrmActionCard({
     };
 
     const saveEdit = async () => {
-      if (invalidEdit || unchanged || pending) return;
+      if (invalidEdit || unchanged || disabled || status.locked) return;
       setEditError(null);
       try {
         await onSelect(encodeCrmOutreachEdit(editBody));
@@ -303,47 +423,67 @@ export function CrmActionCard({
         className="my-2 max-w-xl rounded-lg border border-input/50 bg-muted/20 p-3"
         data-testid="crm-outreach-action"
       >
-        <p className="text-sm font-medium">Review outreach draft</p>
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="flex items-start gap-3"
+          data-testid="crm-outreach-status"
+        >
+          {status.state !== "ready" ? (
+            <StatusIcon aria-hidden="true" className="mt-0.5 size-5 shrink-0" />
+          ) : null}
+          <div>
+            <p className="text-base font-semibold">{status.title}</p>
+            {status.detail ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                {status.detail}
+              </p>
+            ) : null}
+          </div>
+        </div>
         <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg bg-background px-3 py-2 text-sm leading-6">
           {outreachDraft || "The draft body is unavailable."}
         </div>
-        {latestOutreachEdit ? (
-          <p className="mt-2 text-xs text-muted-foreground">
-            Revision submitted in Buzz. The CRM will confirm it before approval.
+        {decisionError ? (
+          <p role="alert" className="mt-2 text-sm">
+            {decisionError}
           </p>
         ) : null}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button
-            disabled={disabled}
-            onClick={() => void onSelect(APPROVE_EMOJI)}
-            size="sm"
-            type="button"
-          >
-            <Check aria-hidden="true" />
-            Approve and send
-          </Button>
-          <Button
-            data-testid="crm-edit-draft"
-            disabled={disabled}
-            onClick={openEditor}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <Pencil aria-hidden="true" />
-            Edit draft
-          </Button>
-          <Button
-            disabled={disabled}
-            onClick={() => void onSelect(CANCEL_EMOJI)}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <X aria-hidden="true" />
-            Reject draft
-          </Button>
-        </div>
+        {!status.locked ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              disabled={disabled || status.state === "awaiting-edit"}
+              onClick={() => void chooseDecision(APPROVE_EMOJI)}
+              size="sm"
+              type="button"
+            >
+              <Check aria-hidden="true" />
+              Approve and send
+            </Button>
+            <Button
+              data-testid="crm-edit-draft"
+              disabled={disabled}
+              onClick={openEditor}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Pencil aria-hidden="true" />
+              Edit draft
+            </Button>
+            <Button
+              disabled={disabled}
+              onClick={() => void chooseDecision(CANCEL_EMOJI)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <X aria-hidden="true" />
+              Reject draft
+            </Button>
+          </div>
+        ) : null}
         <Dialog open={editOpen} onOpenChange={setEditOpen}>
           <DialogContent className="max-w-2xl">
             <DialogHeader>
@@ -382,7 +522,7 @@ export function CrmActionCard({
                 Cancel
               </Button>
               <Button
-                disabled={invalidEdit || unchanged || pending}
+                disabled={invalidEdit || unchanged || disabled || status.locked}
                 onClick={() => void saveEdit()}
                 type="button"
               >

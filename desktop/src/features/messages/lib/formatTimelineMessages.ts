@@ -19,6 +19,11 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
+import { crmEditReactionContent } from "@/shared/api/crmEditReaction";
+import {
+  collectCrmOutreachResults,
+  withoutCrmOutreachReceipt,
+} from "./crmOutreachResult";
 import {
   KIND_JOB_ACCEPTED,
   KIND_JOB_CANCEL,
@@ -282,7 +287,10 @@ export function formatTimelineMessages(
       relaySelfPubkey,
       requireChannelTagForPTags: true,
     }).toLowerCase();
-    const emoji = event.content.trim() || "+";
+    const emoji = crmEditReactionContent(
+      event.content.trim() || "+",
+      event.tags,
+    );
     // Custom-emoji reaction (NIP-30): content is `:shortcode:` and the URL
     // rides on a matching `["emoji", shortcode, url]` tag.
     let emojiUrl: string | undefined;
@@ -413,6 +421,11 @@ export function formatTimelineMessages(
     return depth;
   }
 
+  const crmResults = collectCrmOutreachResults(
+    events,
+    deletedEventIds,
+    relaySelfPubkey,
+  );
   return visibleEvents.map((event) => {
     const author = getAuthorLabel(event);
     const authorPubkey =
@@ -457,7 +470,8 @@ export function formatTimelineMessages(
           ? respondToLookup?.get(authorPubkey.toLowerCase())
           : undefined,
       time: formatTime(event.created_at),
-      body: edit ? edit.content : event.content,
+      body: withoutCrmOutreachReceipt(edit ? edit.content : event.content),
+      crmOutreachResult: crmResults.get(event.id),
       parentId: thread.parentId,
       rootId: thread.rootId,
       depth: getDepth(event),
