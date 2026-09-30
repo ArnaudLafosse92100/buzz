@@ -805,9 +805,9 @@ derived index as proof of relay/database state, Nostr authorization,
 deployment, CI, Block-internal repositories, signing identity, secrets, or
 CRM/Buzz production integration status.
 
-Use `query`, `path`, `affected`, and `explain` to discover likely code paths,
-then verify every material claim in current source and, when relevant, live
-systems. YAML, documentation, public/static assets, generated outputs, Hermit
+Code lookups follow the global CodeGraph rule (graph to understand code, one `rg -n` before an
+edit, `rg` for literal text). Verify live systems when a claim
+depends on them. YAML, documentation, public/static assets, generated outputs, Hermit
 state, and external ecosystem repositories are outside the automatic graph and
 must be checked directly when authoritative.
 AGENTS.md is durable policy rather than live status; verify every dated,
