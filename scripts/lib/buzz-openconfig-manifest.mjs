@@ -128,5 +128,24 @@ export const openConfigTeams = Object.freeze([
   }),
 ]);
 
+// Declared ACP session policy for every OpenConfig persona: one ACP
+// conversation per Buzz thread instead of one shared per channel.
+export const openConfigSessionPolicy = "thread";
+
+/**
+ * Native persona behavior group for a create/PATCH payload, built from a
+ * persona as returned by GET /v1/personas. The native PATCH replaces the whole
+ * group and defaults an absent sessionPolicy to "channel", so it is always
+ * sent: the given policy, else the persona's current one (omitted = channel).
+ */
+export function openConfigBehaviorPayload(persona, sessionPolicy = persona.session_policy ?? "channel") {
+  return {
+    ...(persona.respond_to == null ? {} : { respondTo: persona.respond_to }),
+    respondToAllowlist: persona.respond_to_allowlist ?? [],
+    ...(persona.parallelism == null ? {} : { parallelism: persona.parallelism }),
+    sessionPolicy,
+  };
+}
+
 export const openConfigRoleByName = new Map(openConfigRoles.map((item) => [item.name, item]));
 export const openConfigTeamByName = new Map(openConfigTeams.map((item) => [item.name, item]));

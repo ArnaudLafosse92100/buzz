@@ -12,7 +12,11 @@
  * the routes but leaves existing subprocesses untouched.
  */
 
-import { buzzRepoRoot, openConfigRoles } from "./lib/buzz-openconfig-manifest.mjs";
+import {
+  buzzRepoRoot,
+  openConfigBehaviorPayload,
+  openConfigRoles,
+} from "./lib/buzz-openconfig-manifest.mjs";
 import {
   buzzOpenConfigProfile,
   resolveOpenConfigRoles,
@@ -63,6 +67,7 @@ function snapshotWithoutRoute(persona) {
     respond_to: persona.respond_to,
     respond_to_allowlist: persona.respond_to_allowlist,
     parallelism: persona.parallelism,
+    session_policy: persona.session_policy ?? "channel",
   };
 }
 
@@ -86,17 +91,10 @@ function updatePayload(persona, route) {
     provider: persona.provider,
     namePool: persona.name_pool,
     envVars,
+    // Preserve the persona's current session policy; the native PATCH would
+    // otherwise reset it to "channel".
+    behavior: openConfigBehaviorPayload(persona),
   };
-  const hasBehavior = persona.respond_to !== null
-    || persona.parallelism !== null
-    || persona.respond_to_allowlist.length > 0;
-  if (hasBehavior) {
-    body.behavior = {
-      ...(persona.respond_to === null ? {} : { respondTo: persona.respond_to }),
-      respondToAllowlist: persona.respond_to_allowlist,
-      ...(persona.parallelism === null ? {} : { parallelism: persona.parallelism }),
-    };
-  }
   return body;
 }
 

@@ -3,7 +3,9 @@
 
 import { access } from "node:fs/promises";
 import {
+  openConfigBehaviorPayload,
   openConfigRoles,
+  openConfigSessionPolicy,
   openConfigTeams,
   openConfigRoleByName,
 } from "./lib/buzz-openconfig-manifest.mjs";
@@ -106,6 +108,29 @@ if (JSON.stringify(ship?.members) !== JSON.stringify(["Sisyphus", "Hephaestus", 
 }
 if (JSON.stringify(refactor?.members) !== JSON.stringify(["Sisyphus", "Metis", "Atlas", "Oracle", "Bug Hunt"])) {
   failures.push("refactor-team roster is not the canonical critique/execute/advise/verify pipeline");
+}
+
+// The native persona PATCH replaces the whole behavior group and turns an
+// absent sessionPolicy into "channel", so every payload must carry it.
+if (openConfigSessionPolicy !== "thread") {
+  failures.push("OpenConfig personas must declare per-thread ACP sessions");
+}
+const behaviorBase = { respond_to: "owner-only", respond_to_allowlist: [], parallelism: 1 };
+const declaredBehavior = openConfigBehaviorPayload(behaviorBase, openConfigSessionPolicy);
+if (declaredBehavior?.sessionPolicy !== "thread"
+  || declaredBehavior.respondTo !== "owner-only"
+  || declaredBehavior.parallelism !== 1) {
+  failures.push("declared behavior payload must carry sessionPolicy thread and keep existing fields");
+}
+if (openConfigBehaviorPayload({ ...behaviorBase, session_policy: "thread" })?.sessionPolicy !== "thread") {
+  failures.push("behavior payload must preserve an existing thread session policy");
+}
+if (openConfigBehaviorPayload(behaviorBase)?.sessionPolicy !== "channel") {
+  failures.push("behavior payload must preserve an omitted (channel) session policy explicitly");
+}
+if (openConfigBehaviorPayload({ respond_to: null, respond_to_allowlist: [], parallelism: null, session_policy: "thread" })
+  ?.sessionPolicy !== "thread") {
+  failures.push("behavior payload must be sent for a thread policy even without other behavior fields");
 }
 
 const resolvedRoles = await resolveOpenConfigRoles(openConfigRoles, buzzOpenConfigProfile);

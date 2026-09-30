@@ -7,7 +7,9 @@
 
 import {
   buzzRepoRoot,
+  openConfigBehaviorPayload,
   openConfigRoles,
+  openConfigSessionPolicy,
   openConfigTeams,
 } from "./lib/buzz-openconfig-manifest.mjs";
 import { buzzOpenConfigProfile } from "./lib/buzz-openconfig-routing.mjs";
@@ -76,17 +78,6 @@ function roleMatches(personas, role) {
     && persona.env_vars?.BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE === role.enginePath);
 }
 
-function behaviorPayload(persona) {
-  const allowlist = persona.respond_to_allowlist ?? [];
-  const hasBehavior = persona.respond_to !== null || persona.parallelism !== null || allowlist.length > 0;
-  if (!hasBehavior) return undefined;
-  return {
-    ...(persona.respond_to === null ? {} : { respondTo: persona.respond_to }),
-    respondToAllowlist: allowlist,
-    ...(persona.parallelism === null ? {} : { parallelism: persona.parallelism }),
-  };
-}
-
 function functionalSnapshot(persona) {
   const envVars = { ...(persona.env_vars ?? {}) };
   for (const key of [
@@ -116,7 +107,6 @@ function functionalSnapshot(persona) {
 }
 
 function canonicalPersonaPayload(persona, spec, systemPrompt) {
-  const behavior = behaviorPayload(persona);
   const envVars = {
     ...(persona.env_vars ?? {}),
     BUZZ_OPENCONFIG_ENGINE_PROMPT_FILE: spec.enginePath,
@@ -140,7 +130,7 @@ function canonicalPersonaPayload(persona, spec, systemPrompt) {
     provider: persona.provider,
     namePool: persona.name_pool,
     envVars,
-    ...(behavior ? { behavior } : {}),
+    behavior: openConfigBehaviorPayload(persona, openConfigSessionPolicy),
   };
 }
 
@@ -162,6 +152,9 @@ async function ensurePersona(spec, personas) {
     }
     if (updated.display_name !== spec.displayName || updated.avatar_url !== null || updated.system_prompt !== systemPrompt) {
       throw new Error(`${spec.name}: canonical identity or prompt did not persist`);
+    }
+    if ((updated.session_policy ?? "channel") !== openConfigSessionPolicy) {
+      throw new Error(`${spec.name}: declared ACP session policy did not persist`);
     }
     return { persona: updated, created: false };
   }
@@ -193,6 +186,7 @@ async function ensurePersona(spec, personas) {
           respondTo: "owner-only",
           respondToAllowlist: [],
           parallelism: 1,
+          sessionPolicy: openConfigSessionPolicy,
         },
       },
       startAfterCreate: false,
@@ -284,6 +278,7 @@ for (const role of openConfigRoles) {
   if (actual.display_name !== role.displayName
     || actual.avatar_url !== null
     || actual.system_prompt !== expectedPrompt
+    || (actual.session_policy ?? "channel") !== openConfigSessionPolicy
     || actual.env_vars?.BUZZ_OPENCONFIG_PUBLIC_NAME !== role.name
     || actual.env_vars?.BUZZ_OPENCONFIG_AGENT_NAME !== role.slug
     || actual.env_vars?.BUZZ_OPENCONFIG_PROFILE !== buzzOpenConfigProfile
