@@ -265,6 +265,7 @@ test("owner stops only the agents working on the selected conversation", async (
         type: "cancel_turn",
         channelId: AGENTS_CHANNEL_ID,
         rootEventId: messageId,
+        requestId: expect.any(String),
       },
     });
 });

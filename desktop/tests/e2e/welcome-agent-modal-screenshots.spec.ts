@@ -112,8 +112,10 @@ test.describe("welcome and channel agent entry points", () => {
     await page.getByTestId("create-channel-permissions-option-private").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
-    // Without the Welcome guide chooser, the intro action opens the form directly.
+    // Without the Welcome guide chooser, the intro action opens the add-agent
+    // dialog, whose create entry opens the canonical form.
     await page.getByTestId("welcome-intro-action-create-agent").click();
+    await page.getByTestId("add-channel-create-agent").click();
 
     await expect(page).toHaveURL(/#\/channels\//);
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
