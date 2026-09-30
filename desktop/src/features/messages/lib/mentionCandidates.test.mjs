@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
-  resolvePastedAgentMentions,
 } from "./mentionCandidates.ts";
 
 function persona(id, displayName, isActive = true) {
@@ -128,7 +127,7 @@ test("only complete, owned teams with mentionable members are suggested", () => 
   );
 });
 
-test("teams with duplicate identity display names are not suggested", () => {
+test("teams with duplicate identity display names remain selectable with their exact keys", () => {
   const personas = [
     persona("builder-one", "First"),
     persona("builder-two", "Second"),
@@ -138,13 +137,14 @@ test("teams with duplicate identity display names are not suggested", () => {
     identity("builder-two", "Builder", { pubkey: "2".repeat(64) }),
   ];
 
+  const suggestions = buildTeamMentionCandidates(
+    [team("duplicate-identities", ["builder-one", "builder-two"])],
+    personas,
+    candidates,
+  );
   assert.deepEqual(
-    buildTeamMentionCandidates(
-      [team("duplicate-identities", ["builder-one", "builder-two"])],
-      personas,
-      candidates,
-    ),
-    [],
+    suggestions[0].teamMembers.map((member) => member.pubkey),
+    ["1".repeat(64), "2".repeat(64)],
   );
 });
 
@@ -166,103 +166,6 @@ test("teams with identity and persona display-name collisions are not suggested"
         ]),
       ],
       personas,
-      candidates,
-    ),
-    [],
-  );
-});
-
-test("plain pasted @agent tokens resolve to their managed-agent pubkeys", () => {
-  assert.deepEqual(
-    resolvePastedAgentMentions(
-      "@Explore and @Content-Aware Research: inspect this.",
-      [
-        {
-          kind: "identity",
-          displayName: "Explore",
-          pubkey: "a".repeat(64),
-          isAgent: true,
-          isMember: false,
-        },
-        {
-          kind: "identity",
-          displayName: "Content-Aware Research",
-          pubkey: "b".repeat(64),
-          isAgent: true,
-          isMember: true,
-        },
-      ],
-    ),
-    [
-      { kind: "pubkey", displayName: "Explore", pubkey: "a".repeat(64) },
-      {
-        kind: "pubkey",
-        displayName: "Content-Aware Research",
-        pubkey: "b".repeat(64),
-      },
-    ],
-  );
-});
-
-test("plain pasted @persona tokens preserve persona provisioning", () => {
-  assert.deepEqual(
-    resolvePastedAgentMentions(
-      "Please ask @Multimodal Looker to inspect the image.",
-      [
-        {
-          kind: "persona",
-          displayName: "Multimodal Looker",
-          personaId: "multimodal-looker-persona",
-          isAgent: true,
-          isMember: false,
-        },
-      ],
-    ),
-    [
-      {
-        kind: "persona",
-        displayName: "Multimodal Looker",
-        personaId: "multimodal-looker-persona",
-      },
-    ],
-  );
-});
-
-test("pasted agent resolution rejects people, email addresses, code, and ambiguity", () => {
-  const candidates = [
-    {
-      kind: "identity",
-      displayName: "Explore",
-      pubkey: "a".repeat(64),
-      isAgent: true,
-      isMember: false,
-    },
-    {
-      kind: "identity",
-      displayName: "Arnaud",
-      pubkey: "c".repeat(64),
-      isAgent: false,
-      isMember: true,
-    },
-    {
-      kind: "persona",
-      displayName: "Duplicate",
-      personaId: "one",
-      isAgent: true,
-      isMember: false,
-    },
-    {
-      kind: "persona",
-      displayName: "Duplicate",
-      personaId: "two",
-      isAgent: true,
-      isMember: false,
-    },
-  ];
-
-  assert.deepEqual(
-    resolvePastedAgentMentions(
-      "arnaud@Explore.example `@Explore` @Arnaud @Duplicate",
       candidates,
     ),
     [],

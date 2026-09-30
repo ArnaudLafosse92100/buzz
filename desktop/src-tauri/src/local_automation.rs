@@ -312,6 +312,7 @@ async fn update_agent_args(
             provider: None,
             respond_to: None,
             respond_to_allowlist: None,
+            effort_level: None,
         },
         state.app.clone(),
         state.app.state::<AppState>(),
@@ -342,10 +343,17 @@ async fn start_agent(
     Path(pubkey): Path<String>,
 ) -> Result<Json<ManagedAgentSummary>, AutomationError> {
     authorize(&headers, &state.bearer_token)?;
-    commands::start_managed_agent(pubkey, state.app.clone(), state.app.state::<AppState>())
-        .await
-        .map(Json)
-        .map_err(AutomationError::Internal)
+    commands::start_managed_agent(
+        pubkey,
+        None,
+        None,
+        None,
+        state.app.clone(),
+        state.app.state::<AppState>(),
+    )
+    .await
+    .map(Json)
+    .map_err(AutomationError::Internal)
 }
 
 async fn stop_agent(

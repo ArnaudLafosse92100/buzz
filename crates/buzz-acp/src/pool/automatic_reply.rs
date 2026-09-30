@@ -130,6 +130,7 @@ async fn publish_automatic_reply(
         &[],
         false,
         &[],
+        &[],
     )
     .map_err(|error| AcpError::Delivery(format!("message build failed: {error}")))?;
     let event = builder

@@ -44,7 +44,7 @@ pub(super) fn command_search_dirs_for(
     })
 }
 
-fn command_search_dirs() -> Vec<PathBuf> {
+pub(super) fn command_search_dirs() -> Vec<PathBuf> {
     let current_dir = std::env::current_dir().ok();
     let executable_dir = std::env::current_exe()
         .ok()
