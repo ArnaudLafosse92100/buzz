@@ -118,9 +118,17 @@ The `content` field decrypts to:
 ```json
 {
   "type":      "cancel_turn",
-  "channelId": "<channel_uuid>"
+  "channelId": "<channel_uuid>",
+  "rootEventId": "<optional_nostr_thread_root>"
 }
 ```
+
+When `rootEventId` is present, the harness MUST cancel only an in-flight batch
+containing that conversation root, discard queued descendants of that root,
+and leave unrelated roots in the same channel runnable. The harness SHOULD
+retain a bounded in-memory tombstone so late delegations cannot immediately
+restart the cancelled task. Omitting `rootEventId` preserves the legacy
+channel-scoped current-turn cancellation behavior.
 
 The only defined control type is `cancel_turn`. Implementations MUST ignore
 events with unrecognized `type` values.
@@ -291,7 +299,8 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
 ```json
 {
   "type":      "cancel_turn",
-  "channelId": "52a85618-0f8f-4542-94ec-599e6e1c6f2e"
+  "channelId": "52a85618-0f8f-4542-94ec-599e6e1c6f2e",
+  "rootEventId": "8f31...d02a"
 }
 ```
 

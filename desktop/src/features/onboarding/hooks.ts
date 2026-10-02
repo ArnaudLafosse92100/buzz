@@ -2,22 +2,17 @@ import * as React from "react";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import {
-  managedAgentsQueryKey,
-  relayAgentsQueryKey,
-} from "@/features/agents/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
   ensureWelcomeChannel,
-  hasEnsuredWelcomeChannel,
-  markWelcomeChannelEnsured,
+  hasSettledChannelOnboarding,
+  markChannelOnboardingSettled,
   notifyWelcomeChannelReady,
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
 import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
 import { ensureWelcomeCanvas } from "@/features/onboarding/welcomeCanvas";
-import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -31,6 +26,11 @@ import {
   updateChannel,
 } from "@/shared/api/tauri";
 
+// Adapter: resolves the full channel list without the not-modified short-circuit.
+// Onboarding paths run once and always need fresh data.
+const getChannelsList = (): Promise<Channel[]> =>
+  getChannels(null).then((payload) => payload.channels ?? []);
+
 const STARTER_CHANNEL_SETUP_TOAST_ID = "starter-channel-setup-error";
 
 export type ChannelInitResult =
@@ -40,7 +40,6 @@ export type ChannelInitResult =
 const welcomeSeedPromises = new Map<string, Promise<void>>();
 
 function seedWelcomeExperience(
-  queryClient: ReturnType<typeof useQueryClient>,
   channelId: string,
   pubkey: string | null,
   communityScope: string | null,
@@ -51,13 +50,8 @@ function seedWelcomeExperience(
 
   const promise = (async () => {
     try {
-      await ensureWelcomeTeam(channelId, communityScope);
       await ensureWelcomeCanvas(channelId);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-      ]);
-      markWelcomeChannelEnsured(pubkey, communityScope);
+      markChannelOnboardingSettled(pubkey, communityScope);
     } catch (error) {
       console.warn("Failed to seed the private Welcome experience.", error);
     }
@@ -82,15 +76,31 @@ export async function initializeStarterChannels(
     let starterChannels: Awaited<
       ReturnType<typeof ensureStarterChannels>
     > | null = null;
-    let starterChannelsError: unknown = null;
     try {
       starterChannels = await ensureStarterChannels({
         ensureStarterChannels: ensureStarterChannelsCommand,
-        getChannels,
+        getChannels: getChannelsList,
       });
     } catch (error) {
-      starterChannelsError = error;
+      // Public starter channels are optional. Owners may have deliberately
+      // deleted their deterministic starter channels; that must not strand a
+      // new member after the required private Welcome channel succeeds.
       console.warn("Failed to initialize public starter channels.", error);
+    }
+
+    if (starterChannels?.kind === "custom") {
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
+        const ensuredIds = new Set(
+          starterChannels.channels.map((channel) => channel.id),
+        );
+        return [
+          ...starterChannels.channels,
+          ...channels.filter((channel) => !ensuredIds.has(channel.id)),
+        ];
+      });
+      markChannelOnboardingSettled(pubkey, communityScope);
+      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      return { ok: true };
     }
 
     const welcomeChannel = await ensureWelcomeChannel(
@@ -98,7 +108,7 @@ export async function initializeStarterChannels(
         createChannel,
         deleteChannel,
         getChannelMembers,
-        getChannels,
+        getChannels: getChannelsList,
         updateChannel,
       },
       {
@@ -122,12 +132,7 @@ export async function initializeStarterChannels(
         ...channels.filter((channel) => !ensuredIds.has(channel.id)),
       ];
     });
-    void seedWelcomeExperience(
-      queryClient,
-      welcomeChannel.id,
-      pubkey,
-      communityScope,
-    );
+    void seedWelcomeExperience(welcomeChannel.id, pubkey, communityScope);
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
       // Refreshing can briefly replace the optimistic cache with an older relay
@@ -145,16 +150,6 @@ export async function initializeStarterChannels(
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
     const focusChannelId = focus ? welcomeChannel.id : undefined;
-    if (starterChannelsError) {
-      return {
-        ok: false,
-        focusChannelId,
-        reason:
-          starterChannelsError instanceof Error
-            ? starterChannelsError.message
-            : "Failed to set up starter channels",
-      };
-    }
     return { ok: true, focusChannelId };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);
@@ -172,7 +167,7 @@ async function refreshChannelsCache(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
   try {
-    queryClient.setQueryData(channelsQueryKey, await getChannels());
+    queryClient.setQueryData(channelsQueryKey, await getChannelsList());
   } catch {
     // The next mounted channels query can still retry; this cache refresh is
     // only here to avoid a blank Home flash after first-run setup.
@@ -581,7 +576,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       !currentPubkey ||
       !starterChannelsCommunityScope ||
       !readOnboardingCompletion(currentPubkey) ||
-      hasEnsuredWelcomeChannel(currentPubkey, starterChannelsCommunityScope)
+      hasSettledChannelOnboarding(currentPubkey, starterChannelsCommunityScope)
     ) {
       return;
     }
@@ -651,6 +646,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     initialProfile: {
       profile: profileQuery.data,
     },
+    initialProfileDecisionSettled: onboardingGate.stage !== "blocking",
   };
 
   // Recovery completed this boot: force a relaunch screen regardless of any
