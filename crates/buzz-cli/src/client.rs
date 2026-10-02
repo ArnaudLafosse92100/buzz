@@ -60,20 +60,25 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum generic attachment size. This matches the relay's default
+/// `BUZZ_MAX_FILE_BYTES`; the relay remains the final authority.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -327,7 +332,7 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 600).to_string();
+    let exp_str = (now + 60).to_string();
     let domain = relay_server_tag(media_url)
         .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?;
     let tags = vec![
@@ -350,28 +355,23 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
 fn sign_blossom_upload(
     keys: &Keys,
     sha256: &str,
-    mime: &str,
+    _mime: &str,
     relay_url: &str,
 ) -> Result<String, CliError> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let expiry: u64 = if mime.starts_with("video/") {
-        3600
-    } else {
-        600
-    };
-    let exp_str = (now + expiry).to_string();
+    let exp_str = (now + 60).to_string();
+    let domain = relay_server_tag(relay_url)
+        .ok_or_else(|| CliError::Usage(format!("invalid relay URL: {relay_url}")))?;
 
-    let mut tags = vec![
+    let tags = vec![
         Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
         Tag::parse(["x", sha256]).map_err(|e| CliError::Other(e.to_string()))?,
         Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
+        Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
     ];
-    if let Some(domain) = relay_server_tag(relay_url) {
-        tags.push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
-    }
 
     let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
         .tags(tags)
@@ -728,6 +728,27 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Query a filter exhaustively up to `max_events`.
+    ///
+    /// One extra event is requested so reaching the bound is reported as
+    /// truncation instead of being mistaken for authoritative absence.
+    pub async fn query_all_bounded(
+        &self,
+        filter: serde_json::Value,
+        max_events: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let probe_limit = max_events
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("query bound is too large".into()))?;
+        let events = self.query_pages(filter, Some(probe_limit)).await?;
+        if events.len() > max_events as usize {
+            return Err(CliError::Other(format!(
+                "query exceeded the exhaustive {max_events}-event bound; narrow the query or retry"
+            )));
+        }
+        Ok(events)
+    }
+
     /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
     /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
     ///
@@ -847,6 +868,97 @@ impl BuzzClient {
             }
         })
         .await
+    }
+
+    /// POST a JSON body to a relay-relative path with NIP-98 authentication.
+    ///
+    /// Used by `buzz gifs search` and `buzz gifs share` to reach the relay's
+    /// KLIPY proxy endpoints.  Returns the raw response body as a string (may
+    /// be empty for 204 No Content responses).
+    pub async fn post_json_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body_bytes = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("request serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body_bytes = body_bytes.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body_bytes),
+                    )
+                    .send()
+                    .await?;
+                // 204 No Content: return empty string rather than failing on
+                // an empty body that cannot be parsed as JSON.
+                if resp.status() == reqwest::StatusCode::NO_CONTENT {
+                    return Ok(String::new());
+                }
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
+    /// Send a state-changing JSON command exactly once. Ambiguous delivery
+    /// never invites an automatic re-run with a newly observed version.
+    pub async fn post_json_once_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = serde_json::to_vec(body).map_err(|e| CliError::Other(e.to_string()))?;
+        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+        let unknown = |detail: String| CliError::DeliveryUnknown(detail);
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
+            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
+            .build()?;
+        let response = self
+            .with_auth_tag(
+                http.post(&url)
+                    .header("Authorization", auth)
+                    .header("Content-Type", "application/json")
+                    .body(body),
+            )
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_builder() {
+                    CliError::Network(e)
+                } else {
+                    unknown(e.to_string())
+                }
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|e| unknown(e.to_string()))?;
+        let message = extract_relay_message_field(&body).unwrap_or_else(|| body.clone());
+        if status.is_server_error()
+            || status.is_redirection()
+            || (status.as_u16() == 429 && !message.starts_with("rate-limited:"))
+        {
+            return Err(unknown(format!("HTTP {}: {message}", status.as_u16())));
+        }
+        if !status.is_success() {
+            return Err(CliError::Relay {
+                status: status.as_u16(),
+                body: message,
+            });
+        }
+        Ok(body)
     }
 
     /// Submit a signed Nostr event via POST /events.
@@ -1113,16 +1225,11 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        // 3. Size check. The relay owns content-type validation for generic
+        // attachments (documents, archives, and deny-listed active content).
+        // Keeping a partial MIME allow-list here would reject safe formats
+        // such as PDFs before the relay can apply its authoritative policy.
+        let max = max_upload_bytes(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -1302,20 +1409,24 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("http://", "ws://")
 }
 
-/// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Normalize raw event JSON array into the canonical Nostr event shape.
+/// String signatures are preserved; absent or non-string signatures remain absent.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
                 "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
+            });
+            if let Some(sig) = e.get("sig").and_then(|v| v.as_str()) {
+                event["sig"] = serde_json::json!(sig);
+            }
+            event
         })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_default()
@@ -1387,19 +1498,25 @@ pub fn extract_p_tags(event: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Return a create-command response with an entity ID injected.
-pub fn create_response_with_id(resp: &str, id_key: &str, id_val: &str) -> String {
+/// Return a create-command response, injecting the entity ID **only** when the
+/// relay accepted the event (`"accepted": true`). When the relay rejected the
+/// event, emitting the locally-computed link would be misleading — callers
+/// that copy or share the link would reference an event that was never stored.
+pub fn create_response_with_id_if_accepted(resp: &str, id_key: &str, id_val: &str) -> String {
     let mut v: serde_json::Value = serde_json::from_str(resp).unwrap_or(serde_json::json!({}));
-    v[id_key] = serde_json::json!(id_val);
-    if v.get("accepted").is_none() {
-        v["accepted"] = serde_json::json!(true);
+    let accepted = v.get("accepted").and_then(|a| a.as_bool()).unwrap_or(false);
+    if accepted {
+        v[id_key] = serde_json::json!(id_val);
     }
     v.to_string()
 }
 
 /// Print a create-command response, injecting the generated entity ID.
 pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
-    println!("{}", create_response_with_id(resp, id_key, id_val));
+    println!(
+        "{}",
+        create_response_with_id_if_accepted(resp, id_key, id_val)
+    );
 }
 
 /// Extract a JSON field from relay write response messages shaped as
@@ -1588,7 +1705,7 @@ mod retry_policy_tests {
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderMap, Response, StatusCode};
-    use axum::routing::post;
+    use axum::routing::{post, put};
     use axum::Router;
     use nostr::{EventBuilder, Keys, Kind};
     use tokio::net::TcpListener;
@@ -2199,6 +2316,45 @@ mod retry_policy_tests {
         );
     }
 
+    /// Generic attachments are validated by the relay, which knows the active
+    /// file deny-list. The CLI must not reject a safe document before it reaches
+    /// that authoritative validation path.
+    #[tokio::test]
+    async fn upload_file_allows_relay_validated_pdf_attachments() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"%PDF-1.7\n% local test fixture\n").unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_handler = attempts.clone();
+        let app = Router::new().route(
+            "/upload",
+            put(move |_headers: HeaderMap, _body: Body| {
+                let attempts = attempts_for_handler.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"url":"https://relay.test/media/document.pdf","sha256":"aabbcc","size":28,"type":"application/pdf","uploaded":0}"#;
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = test_client(&format!("http://{addr}"));
+        let descriptor = client.upload_file(&file_path).await.unwrap();
+
+        assert_eq!(descriptor.mime_type, "application/pdf");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
     /// When all retry attempts for a stored event end with a partial body (200
     /// headers, dropped connection), the final error must be `DeliveryUnknown`
     /// (retryable:false) — the relay may have stored the event on any attempt, so
@@ -2297,9 +2453,43 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
+        max_upload_bytes, normalize_events, BuzzClient, MAX_FILE_BYTES, MAX_IMAGE_BYTES,
+        MAX_VIDEO_BYTES,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn normalize_events_preserves_the_complete_signed_event_shape() {
+        let signed_event = EventBuilder::new(Kind::TextNote, "signed content")
+            .tags([Tag::parse(["h", "channel-id"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut event = serde_json::to_value(&signed_event).unwrap();
+        event["relay_internal"] = serde_json::json!("excluded");
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&normalize_events(&[event])).unwrap();
+        let normalized = &output[0];
+        let round_tripped: nostr::Event = serde_json::from_value(normalized.clone()).unwrap();
+
+        assert_eq!(round_tripped, signed_event);
+        round_tripped.verify().unwrap();
+        assert!(normalized.get("sig").is_some());
+        assert!(normalized.get("relay_internal").is_none());
+    }
+
+    #[test]
+    fn normalize_events_omits_missing_or_non_string_signatures() {
+        let output: Vec<serde_json::Value> = serde_json::from_str(&normalize_events(&[
+            serde_json::json!({}),
+            serde_json::json!({"sig": 42}),
+        ]))
+        .unwrap();
+
+        assert!(output[0].get("sig").is_none());
+        assert!(output[1].get("sig").is_none());
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
@@ -2313,6 +2503,14 @@ mod tests {
 
         assert_eq!(filter["until"], serde_json::json!(10));
         assert_eq!(filter["before_id"], serde_json::json!("b".repeat(64)));
+    }
+
+    #[test]
+    fn generic_attachments_use_the_relay_file_limit() {
+        assert_eq!(max_upload_bytes("application/octet-stream"), MAX_FILE_BYTES);
+        assert_eq!(max_upload_bytes("application/pdf"), MAX_FILE_BYTES);
+        assert_eq!(max_upload_bytes("image/png"), MAX_IMAGE_BYTES);
+        assert_eq!(max_upload_bytes("video/mp4"), MAX_VIDEO_BYTES);
     }
 
     #[test]
@@ -2345,13 +2543,28 @@ mod tests {
     }
 
     #[test]
-    fn create_response_with_id_overrides_local_id_with_relay_id() {
+    fn create_response_with_id_if_accepted_injects_id_when_accepted() {
         let raw = r#"{"event_id":"abc","accepted":true,"message":"response:{\"workflow_id\":\"relay-id\"}"}"#;
-        let out = create_response_with_id(raw, "workflow_id", "relay-id");
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "relay-id");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID injected and original fields preserved when accepted.
         assert_eq!(v["workflow_id"].as_str(), Some("relay-id"));
         assert_eq!(v["event_id"].as_str(), Some("abc"));
         assert_eq!(v["accepted"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn create_response_with_id_if_accepted_omits_id_when_rejected() {
+        let raw = r#"{"event_id":"abc","accepted":false,"message":"duplicate"}"#;
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "local-id");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID must not be present when relay rejected the event; emitting a
+        // link to an event that was never stored would mislead callers.
+        assert!(
+            v.get("workflow_id").is_none(),
+            "link field must be absent on rejected create"
+        );
+        assert_eq!(v["accepted"].as_bool(), Some(false));
     }
 
     // --- (a) auth-suppression regression pair ---

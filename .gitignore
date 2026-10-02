@@ -3,6 +3,10 @@
 /dist/
 /admin-web/dist/
 
+# Python cache
+__pycache__/
+*.pyc
+
 # lefthook-generated hook scripts (machine-specific)
 .hooks/
 
@@ -59,6 +63,10 @@ doc/
 # Local identity files
 identity.key
 **/identity.key
+*.p12
+*.pfx
+*.pem
+*.key
 
 # Claude Code worktrees
 .claude/worktrees/
@@ -68,3 +76,6 @@ identity.key
 
 # Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
 deploy/charts/*/charts/*.tgz
+
+# Local agent/runtime state
+/.omo/
