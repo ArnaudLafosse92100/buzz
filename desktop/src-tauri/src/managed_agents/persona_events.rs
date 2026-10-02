@@ -447,13 +447,29 @@ pub(crate) async fn flush_pending_events_at(
             ),
         )
         .await;
-        if !matches!(submit, Ok(Ok(_))) {
-            if current.kind == 5 {
-                failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+        let accepted = match submit {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) if is_terminal_archive_rejection(current.kind, &error) => {
+                tracing::warn!(
+                    "persona flush: dropping kind:{} for '{}' from the retry queue \
+                     after a permanent relay rejection: {error}",
+                    current.kind,
+                    current.d_tag
+                );
+                false
             }
-            continue; // relay unreachable, rejected, or timed out — stays pending
-        }
+            _ => {
+                if current.kind == 5 {
+                    failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+                }
+                continue; // relay unreachable, rejected, or timed out — stays pending
+            }
+        };
 
+        // Accepted rows are synced; a terminally rejected archive request is
+        // retired the same way so the sweep stops re-POSTing it. The retained
+        // row stays as the durable record, and the compare-and-clear still
+        // keeps a newer request at the same coordinate pending.
         let conn = open_retention_db(db_path)?;
         mark_synced(
             &conn,
@@ -463,10 +479,26 @@ pub(crate) async fn flush_pending_events_at(
             current.created_at,
             &current.content,
         )?;
-        flushed += 1;
+        if accepted {
+            flushed += 1;
+        }
     }
 
     Ok(flushed)
+}
+
+/// Whether a failed publish of a NIP-IA archive/unarchive request can never
+/// succeed on retry.
+///
+/// The relay answers validation rejections with HTTP 400 (for example a target
+/// with no live kind:0 profile, or a kind:0 that no longer attests to this
+/// owner). Freshness is not one of them here: the flush re-signs each request
+/// with a fresh `created_at` before publishing. Retrying such a request every
+/// sweep only floods the relay, so it is taken out of the queue instead.
+/// Transport errors, timeouts, 429s, and 5xx responses stay retryable.
+fn is_terminal_archive_rejection(kind: u32, error: &str) -> bool {
+    buzz_core_pkg::kind::is_identity_archive_request_kind(kind)
+        && error.starts_with("relay returned 400 ")
 }
 
 /// Re-sign a retained event with the current owner keys and a fresh

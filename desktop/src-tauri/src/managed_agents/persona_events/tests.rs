@@ -1099,4 +1099,124 @@ mod flush_barrier {
             "unrelated row marked synced"
         );
     }
+
+    /// Stub relay that answers every kind:9035 POST with `archive_status` and
+    /// the relay's `api_error` body, counting the archive POSTs it receives.
+    async fn spawn_archive_stub_relay(
+        archive_status: axum::http::StatusCode,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::{routing::post, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let archive_posts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&archive_posts);
+        let app = Router::new().route(
+            "/events",
+            post(move |body: String| {
+                let counter = std::sync::Arc::clone(&counter);
+                async move {
+                    let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    assert_eq!(
+                        event.get("kind").and_then(serde_json::Value::as_u64),
+                        Some(u64::from(buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST)),
+                    );
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    (
+                        archive_status,
+                        serde_json::json!({
+                            "error": "invalid: target has no live kind:0 profile"
+                        })
+                        .to_string(),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub relay");
+        let addr = listener.local_addr().expect("stub relay addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{addr}"), archive_posts)
+    }
+
+    /// Retain a kind:9035 row keyed like agent deletion's enqueue and
+    /// sweep twice against a relay answering `archive_status`. Returns the
+    /// row's final `pending_sync` and the number of archive POSTs observed.
+    async fn sweep_archive_twice(archive_status: axum::http::StatusCode) -> (bool, usize) {
+        let keys = nostr::Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("retention.db");
+        let archive =
+            crate::events::build_archive_identity_request(&agent, "", Some("retired"), None, None)
+                .expect("build archive request")
+                .sign_with_keys(&keys)
+                .expect("sign archive request");
+        retain_event(
+            &open_retention_db(&db_path).expect("open db"),
+            &RetainedEvent {
+                kind: buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST,
+                pubkey: owner.clone(),
+                d_tag: agent.clone(),
+                content: archive.content.to_string(),
+                created_at: archive.created_at.as_secs() as i64,
+                raw_event: archive.as_json(),
+                pending_sync: true,
+            },
+        )
+        .expect("retain archive request");
+
+        let (relay, archive_posts) = spawn_archive_stub_relay(archive_status).await;
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+        *state.relay_url_override.lock().unwrap() = Some(relay);
+
+        for _ in 0..2 {
+            let flushed = flush_pending_events(&db_path, &state).await.expect("flush");
+            assert_eq!(
+                flushed, 0,
+                "a rejected archive is never counted as published"
+            );
+        }
+
+        let row = get_retained_event(
+            &open_retention_db(&db_path).expect("reopen db"),
+            buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST,
+            &owner,
+            &agent,
+        )
+        .unwrap()
+        .expect("the archive row is kept as the durable record");
+        (
+            row.pending_sync,
+            archive_posts.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// A NIP-IA archive request the relay rejects with HTTP 400 (e.g. the
+    /// target has no live kind:0 profile) can never succeed on retry. The
+    /// sweep must take it out of the retry queue after the first rejection
+    /// instead of re-POSTing it every 30s forever.
+    #[tokio::test]
+    async fn permanently_rejected_archive_request_leaves_retry_queue() {
+        let (pending, posts) = sweep_archive_twice(axum::http::StatusCode::BAD_REQUEST).await;
+        assert!(
+            !pending,
+            "a 400-rejected archive request must not stay pending"
+        );
+        assert_eq!(posts, 1, "the second sweep must not re-POST it");
+    }
+
+    /// A transient relay failure keeps the archive request pending so the
+    /// next sweep retries it.
+    #[tokio::test]
+    async fn transiently_failed_archive_request_stays_pending() {
+        let (pending, posts) =
+            sweep_archive_twice(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert!(pending, "a 5xx-failed archive request stays pending");
+        assert_eq!(posts, 2, "each sweep retries it");
+    }
 }
