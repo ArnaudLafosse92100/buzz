@@ -842,3 +842,96 @@ fn inbound_tombstone_json_failure_leaves_replay_retryable() {
         "replay commits the tombstone row"
     );
 }
+
+// Gated off Windows for the same reason as `persona_events::tests::flush_barrier`:
+// `build_app_state()` pulls native DLLs unavailable in the Windows CI runner.
+#[cfg(not(target_os = "windows"))]
+mod active_scope {
+    use super::*;
+    use crate::app_state::build_app_state;
+    use tauri::Manager;
+
+    /// Mock app whose app data dir is unique to this test and removed on drop,
+    /// so `active_retention_scope` resolves a real, isolated base directory.
+    struct ScopeApp {
+        app: tauri::App<tauri::test::MockRuntime>,
+        data_dir: PathBuf,
+    }
+
+    impl Drop for ScopeApp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.data_dir);
+        }
+    }
+
+    fn scope_app(relay_override: Option<&str>) -> ScopeApp {
+        let state = build_app_state();
+        *state.relay_url_override.lock().unwrap() = relay_override.map(str::to_string);
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = format!(
+            "dev.buzz.retention-scope-test.{}",
+            nostr::Keys::generate().public_key().to_hex()
+        );
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .build(context)
+            .unwrap();
+        let data_dir = app.path().app_data_dir().unwrap();
+        ScopeApp { app, data_dir }
+    }
+
+    #[test]
+    fn active_retention_scope_fails_closed_without_workspace_relay() {
+        let scope_app = scope_app(None);
+        let state = scope_app.app.state::<AppState>();
+        assert!(state.signing_keys().is_ok(), "keys are available");
+
+        let result = active_retention_scope(scope_app.app.handle(), &state);
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("no workspace relay configured"),
+            "an unapplied workspace must not resolve the compiled default relay scope"
+        );
+        assert!(
+            !scope_app.data_dir.join("agents").join("retention").exists(),
+            "no retention store may be created before a workspace is applied"
+        );
+    }
+
+    #[test]
+    fn active_retention_scope_accepts_an_applied_localhost_workspace() {
+        let scope_app = scope_app(Some("ws://localhost:3000"));
+        let state = scope_app.app.state::<AppState>();
+
+        let scope = active_retention_scope(scope_app.app.handle(), &state).unwrap();
+
+        assert_eq!(scope.relay_url, "ws://localhost:3000");
+        assert_eq!(
+            scope.db_path,
+            scoped_retention_db_path(
+                &scope_app.data_dir.join("agents"),
+                "ws://localhost:3000",
+                &state.signing_keys().unwrap().public_key().to_hex(),
+            )
+        );
+    }
+
+    #[test]
+    fn active_retention_scope_uses_the_applied_workspace_relay() {
+        let scope_app = scope_app(Some("wss://community.example"));
+        let state = scope_app.app.state::<AppState>();
+
+        let scope = active_retention_scope(scope_app.app.handle(), &state).unwrap();
+
+        assert_eq!(scope.relay_url, "wss://community.example");
+        assert_eq!(
+            scope.db_path,
+            scoped_retention_db_path(
+                &scope_app.data_dir.join("agents"),
+                "wss://community.example",
+                &state.signing_keys().unwrap().public_key().to_hex(),
+            )
+        );
+    }
+}
