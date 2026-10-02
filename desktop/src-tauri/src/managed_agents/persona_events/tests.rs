@@ -1101,9 +1101,11 @@ mod flush_barrier {
     }
 
     /// Stub relay that answers every kind:9035 POST with `archive_status` and
-    /// the relay's `api_error` body, counting the archive POSTs it receives.
+    /// the relay's `api_error` body carrying `reason`, counting the archive
+    /// POSTs it receives.
     async fn spawn_archive_stub_relay(
         archive_status: axum::http::StatusCode,
+        reason: &'static str,
     ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use axum::{routing::post, Router};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1124,7 +1126,7 @@ mod flush_barrier {
                     (
                         archive_status,
                         serde_json::json!({
-                            "error": "invalid: target has no live kind:0 profile"
+                            "error": reason
                         })
                         .to_string(),
                     )
@@ -1142,9 +1144,13 @@ mod flush_barrier {
     }
 
     /// Retain a kind:9035 row keyed like agent deletion's enqueue and
-    /// sweep twice against a relay answering `archive_status`. Returns the
-    /// row's final `pending_sync` and the number of archive POSTs observed.
-    async fn sweep_archive_twice(archive_status: axum::http::StatusCode) -> (bool, usize) {
+    /// sweep twice against a relay answering `archive_status` with `reason`.
+    /// Returns the row's final `pending_sync` and the number of archive POSTs
+    /// observed.
+    async fn sweep_archive_twice(
+        archive_status: axum::http::StatusCode,
+        reason: &'static str,
+    ) -> (bool, usize) {
         let keys = nostr::Keys::generate();
         let owner = keys.public_key().to_hex();
         let agent = nostr::Keys::generate().public_key().to_hex();
@@ -1169,7 +1175,7 @@ mod flush_barrier {
         )
         .expect("retain archive request");
 
-        let (relay, archive_posts) = spawn_archive_stub_relay(archive_status).await;
+        let (relay, archive_posts) = spawn_archive_stub_relay(archive_status, reason).await;
         let state = build_app_state();
         *state.keys.lock().unwrap() = keys;
         *state.relay_url_override.lock().unwrap() = Some(relay);
@@ -1202,7 +1208,11 @@ mod flush_barrier {
     /// instead of re-POSTing it every 30s forever.
     #[tokio::test]
     async fn permanently_rejected_archive_request_leaves_retry_queue() {
-        let (pending, posts) = sweep_archive_twice(axum::http::StatusCode::BAD_REQUEST).await;
+        let (pending, posts) = sweep_archive_twice(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid: target has no live kind:0 profile",
+        )
+        .await;
         assert!(
             !pending,
             "a 400-rejected archive request must not stay pending"
@@ -1214,9 +1224,29 @@ mod flush_barrier {
     /// next sweep retries it.
     #[tokio::test]
     async fn transiently_failed_archive_request_stays_pending() {
-        let (pending, posts) =
-            sweep_archive_twice(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let (pending, posts) = sweep_archive_twice(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        )
+        .await;
         assert!(pending, "a 5xx-failed archive request stays pending");
+        assert_eq!(posts, 2, "each sweep retries it");
+    }
+
+    /// The relay maps every identity-archive handler error to HTTP 400,
+    /// including transient Postgres failures. A 400 whose reason is not a
+    /// permanent validation failure must keep the archive request pending.
+    #[tokio::test]
+    async fn transient_400_archive_rejection_stays_pending() {
+        let (pending, posts) = sweep_archive_twice(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid: database error: pool timed out",
+        )
+        .await;
+        assert!(
+            pending,
+            "a 400 caused by a database error must not drop the archive intent"
+        );
         assert_eq!(posts, 2, "each sweep retries it");
     }
 }

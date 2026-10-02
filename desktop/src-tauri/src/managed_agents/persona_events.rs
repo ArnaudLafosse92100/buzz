@@ -490,15 +490,30 @@ pub(crate) async fn flush_pending_events_at(
 /// Whether a failed publish of a NIP-IA archive/unarchive request can never
 /// succeed on retry.
 ///
-/// The relay answers validation rejections with HTTP 400 (for example a target
-/// with no live kind:0 profile, or a kind:0 that no longer attests to this
-/// owner). Freshness is not one of them here: the flush re-signs each request
-/// with a fresh `created_at` before publishing. Retrying such a request every
-/// sweep only floods the relay, so it is taken out of the queue instead.
-/// Transport errors, timeouts, 429s, and 5xx responses stay retryable.
+/// The relay maps *every* identity-archive handler error to HTTP 400
+/// (`IngestError::Rejected("invalid: {e}")`), including transient Postgres
+/// failures ("database error: …") and clock skew ("event timestamp out of
+/// range"), so the status alone does not prove a rejection is permanent. Only
+/// the validation reasons below are terminal: the target has no live kind:0,
+/// or its live kind:0 attests to a different owner than the one signing the
+/// request (the flush re-signs with the same owner keys, so a retry cannot
+/// change that). Retrying those every sweep only floods the relay, so the
+/// request is taken out of the queue instead. Any other 400, 429, 5xx,
+/// transport error, or timeout stays retryable.
+///
+/// Coupled to `relay::relay_error_message` (formats the error as
+/// `relay returned {status}: {message}`) and to the reason strings in
+/// `buzz-relay/src/handlers/identity_archive.rs`; keep them in sync.
 fn is_terminal_archive_rejection(kind: u32, error: &str) -> bool {
+    const PERMANENT_REASONS: [&str; 2] = [
+        "target has no live kind:0 profile",
+        "live kind:0 no longer attests to request signer",
+    ];
     buzz_core_pkg::kind::is_identity_archive_request_kind(kind)
         && error.starts_with("relay returned 400 ")
+        && PERMANENT_REASONS
+            .iter()
+            .any(|reason| error.contains(reason))
 }
 
 /// Re-sign a retained event with the current owner keys and a fresh
