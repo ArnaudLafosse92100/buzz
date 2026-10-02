@@ -795,21 +795,17 @@ silently to all identities sharing a name. See `docs/mention-editor.md`.
 
 ---
 
-## CodeGraph
+## Code search
 
-CodeGraph is the sole local code-navigation and impact-analysis engine. OmO
-owns its pin, provisioning, MCP bridge and synchronization; do not add a
-project watcher or run the native installer/upgrader. Current source and
-authenticated operational evidence remain authoritative. Never treat the
-derived index as proof of relay/database state, Nostr authorization,
-deployment, CI, Block-internal repositories, signing identity, secrets, or
-CRM/Buzz production integration status.
-
-Code lookups follow the global CodeGraph rule (graph to understand code, one `rg -n` before an
-edit, `rg` for literal text). Verify live systems when a claim
-depends on them. YAML, documentation, public/static assets, generated outputs, Hermit
-state, and external ecosystem repositories are outside the automatic graph and
-must be checked directly when authoritative.
+Search code with `rg` and Read: triage with one `rg -l "<term>"`, read the
+files it points to, and before changing a symbol check its callers with LSP
+find-references (when the harness has it) plus one `rg -n "<name>"`. No
+code-graph index or watcher is used. Current source and authenticated operational evidence remain
+authoritative for relay/database state, Nostr authorization, deployment, CI,
+Block-internal repositories, signing identity, secrets, and CRM/Buzz production
+integration status; verify live systems when a claim depends on them. YAML,
+documentation, public/static assets, generated outputs, Hermit state, and
+external ecosystem repositories must be checked directly when authoritative.
 AGENTS.md is durable policy rather than live status; verify every dated,
 deployed, signed, authorized, or integrated claim from its current source.
 File age or a recent Markdown edit is not proof that mutable state is current.
