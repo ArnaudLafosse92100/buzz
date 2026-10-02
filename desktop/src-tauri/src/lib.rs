@@ -518,6 +518,13 @@ pub fn run() {
                     use tauri::Manager;
                     loop {
                         let state = flush_handle.state::<AppState>();
+                        // No community until `apply_workspace`; the retention
+                        // scope fails closed, so wait quietly instead of
+                        // logging that expected error every tick.
+                        if relay::workspace_relay_override(&state).is_none() {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            continue;
+                        }
                         if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
                             &flush_handle,
                             &state,

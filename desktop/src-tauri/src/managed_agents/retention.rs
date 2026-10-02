@@ -68,13 +68,18 @@ pub fn scoped_retention_db_path(base_dir: &Path, relay_url: &str, owner_pubkey: 
 
 /// Snapshot the active relay + owner and resolve their durable event store.
 ///
+/// Errors until `apply_workspace` has set the workspace relay override.
+///
 /// Callers keep the returned relay and keys alongside the path whenever work
 /// crosses an `.await`; a later workspace switch cannot retarget that work.
 pub fn active_retention_scope<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
 ) -> Result<RetentionScope, String> {
-    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    // Fail closed until a workspace is applied: the env/build/compiled default
+    // relay is not a community, and rows filed under it would never flush.
+    let relay_url = crate::relay::workspace_relay_override(state)
+        .ok_or_else(|| "no workspace relay configured".to_string())?;
     let owner_keys = state.signing_keys()?;
     let base_dir = super::managed_agents_base_dir(app)?;
     let db_path =
