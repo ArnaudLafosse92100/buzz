@@ -573,21 +573,68 @@ class ChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, readTimestamp]);
 
+    final nativeDm =
+        resolvedChannel.isDm && defaultTargetPlatform == TargetPlatform.iOS
+        ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
+        : null;
+    final nativeMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
+    final nativeMemberCount =
+        nativeMembers.value?.length ?? resolvedChannel.memberCount;
+    final nativeMemberLabel =
+        '$nativeMemberCount ${nativeMemberCount == 1 ? 'member' : 'members'}';
+    Future<void> openChannelDetails() async {
+      final shouldClose = await showChannelDetailsPage(
+        context: context,
+        channel: resolvedChannel,
+        currentPubkey: currentPubkey,
+        onMemberTap: (context, pubkey) => showUserProfileSheet(
+          context,
+          pubkey,
+          names: channelIdentityNamesProvider(resolvedChannel.id),
+        ),
+        sectionId: ref
+            .read(channelSectionsProvider)
+            .store
+            .assignments[resolvedChannel.id],
+      );
+      if (shouldClose == true && context.mounted) {
+        Navigator.of(context).pop();
+      }
+    }
+
     return FrostedScaffold(
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
-        leading: usesNativeIosGlassBackButton
-            ? IosGlassNavigationButton(
-                key: const ValueKey('channel-ios-glass-back'),
-                icon: IosGlassNavigationIcon.back,
-                semanticLabel: 'Back',
-                onPressed: () => Navigator.of(context).maybePop(),
-                width: iosGlassChannelHeaderLeadingWidth,
-                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                nativeViewSuppressed: messageActionBackdropActive,
-              )
-            : null,
+        nativeViewSuppressed: messageActionBackdropActive,
+        nativeEphemeralLabel: ephemeralChannelDisplay(
+          resolvedChannel,
+        )?.tooltipLabel,
+        nativeTitle:
+            nativeDm?.label ??
+            resolveDmChannelDisplayLabel(
+              resolvedChannel,
+              currentPubkey: currentPubkey,
+            ),
+        nativeSubtitle: isOneToOneDm
+            ? nativeDm?.presenceLabel
+            : nativeMemberLabel,
+        nativeTitlePresenceColor: switch (isOneToOneDm
+            ? nativeDm?.presence
+            : null) {
+          'online' => context.appColors.success,
+          'away' => context.appColors.warning,
+          'offline' => context.colors.outline,
+          _ => null,
+        },
+        onNativeTitlePressed: openChannelDetails,
+        nativeActions: [
+          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+            _huddleNavigationAction(context, ref, resolvedChannel, [
+              ...messagesState.value ?? const [],
+              ...huddleLifecycle,
+            ]),
+        ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
@@ -604,25 +651,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 )
               : _ChannelAppBarTitle(
                   channel: resolvedChannel,
-                  onTap: () async {
-                    final shouldClose = await showChannelDetailsPage(
-                      context: context,
-                      channel: resolvedChannel,
-                      currentPubkey: currentPubkey,
-                      onMemberTap: (context, pubkey) => showUserProfileSheet(
-                        context,
-                        pubkey,
-                        names: channelIdentityNamesProvider(resolvedChannel.id),
-                      ),
-                      sectionId: ref
-                          .read(channelSectionsProvider)
-                          .store
-                          .assignments[resolvedChannel.id],
-                    );
-                    if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
-                    }
-                  },
+                  onTap: openChannelDetails,
                 ),
         ),
         actions: resolvedChannel.isDm
