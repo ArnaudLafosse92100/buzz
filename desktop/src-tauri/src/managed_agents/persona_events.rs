@@ -426,7 +426,7 @@ pub(crate) async fn flush_pending_events_at(
             // timestamp at publish time; kind, tags, and content are preserved,
             // and `mark_synced` below still compares against the retained row's
             // original `created_at`/`content`, which are untouched.
-            resign_with_fresh_timestamp(&event, state)?
+            resign_with_fresh_timestamp(&event, owner_keys)?
         } else {
             event
         };
@@ -450,11 +450,10 @@ pub(crate) async fn flush_pending_events_at(
         let accepted = match submit {
             Ok(Ok(_)) => true,
             Ok(Err(error)) if is_terminal_archive_rejection(current.kind, &error) => {
-                tracing::warn!(
-                    "persona flush: dropping kind:{} for '{}' from the retry queue \
-                     after a permanent relay rejection: {error}",
-                    current.kind,
-                    current.d_tag
+                eprintln!(
+                    "buzz-desktop: persona flush: dropping kind:{} for '{}' from the retry \
+                     queue after a permanent relay rejection: {error}",
+                    current.kind, current.d_tag
                 );
                 false
             }
@@ -487,27 +486,33 @@ pub(crate) async fn flush_pending_events_at(
     Ok(flushed)
 }
 
-/// Whether a failed publish of a NIP-IA archive/unarchive request can never
-/// succeed on retry.
+/// Whether a failed publish of a NIP-IA archive/unarchive request is a
+/// rejection that re-signing and retrying the same request cannot fix.
 ///
 /// The relay maps *every* identity-archive handler error to HTTP 400
 /// (`IngestError::Rejected("invalid: {e}")`), including transient Postgres
 /// failures ("database error: …") and clock skew ("event timestamp out of
-/// range"), so the status alone does not prove a rejection is permanent. Only
-/// the validation reasons below are terminal: the target has no live kind:0,
-/// or its live kind:0 attests to a different owner than the one signing the
-/// request (the flush re-signs with the same owner keys, so a retry cannot
-/// change that). Retrying those every sweep only floods the relay, so the
-/// request is taken out of the queue instead. Any other 400, 429, 5xx,
-/// transport error, or timeout stays retryable.
+/// range"), so the status alone does not prove a rejection is permanent. The
+/// reasons below come from the owner-consent check and depend only on the
+/// request's frozen tags, its signer (the flush re-signs with the scope's
+/// owner keys, the row's own pubkey), and the target's live kind:0: no live
+/// kind:0, a live kind:0 with a missing or invalid `auth` tag or one attesting
+/// to another owner, or a request `auth` tag naming another owner. Only a
+/// relay-side change (a new kind:0, or the signer becoming a community admin)
+/// would let the same request through, and the 30s sweep should not poll for
+/// that, so the request leaves the queue. Any other 400, 429, 5xx, transport
+/// error, or timeout stays retryable.
 ///
 /// Coupled to `relay::relay_error_message` (formats the error as
 /// `relay returned {status}: {message}`) and to the reason strings in
 /// `buzz-relay/src/handlers/identity_archive.rs`; keep them in sync.
 fn is_terminal_archive_rejection(kind: u32, error: &str) -> bool {
-    const PERMANENT_REASONS: [&str; 2] = [
+    const PERMANENT_REASONS: [&str; 5] = [
         "target has no live kind:0 profile",
         "live kind:0 no longer attests to request signer",
+        "invalid: invalid live kind:0 auth tag: ",
+        "invalid: missing auth tag",
+        "request auth owner must equal request signer",
     ];
     buzz_core_pkg::kind::is_identity_archive_request_kind(kind)
         && error.starts_with("relay returned 400 ")
@@ -516,7 +521,7 @@ fn is_terminal_archive_rejection(kind: u32, error: &str) -> bool {
             .any(|reason| error.contains(reason))
 }
 
-/// Re-sign a retained event with the current owner keys and a fresh
+/// Re-sign a retained event with the scope's owner keys and a fresh
 /// `created_at`, preserving kind, tags, and content.
 ///
 /// Used for relay-freshness-checked kinds (NIP-IA 9035/9036) that would
@@ -524,18 +529,17 @@ fn is_terminal_archive_rejection(kind: u32, error: &str) -> bool {
 /// relay is unreachable. `.allow_self_tagging()` mirrors
 /// `events::build_archive_identity_request` — nostr strips `p` tags matching
 /// the signer by default, which would corrupt a self-targeted request.
-///
-/// Synchronous; the `state.keys` guard is dropped on return, so callers may
-/// `.await` afterwards.
+/// Signing with the scope keys rather than the live `AppState` identity keeps
+/// the signer equal to the request's `auth` owner even if the active identity
+/// changes mid-flush.
 fn resign_with_fresh_timestamp(
     event: &nostr::Event,
-    state: &AppState,
+    owner_keys: &nostr::Keys,
 ) -> Result<nostr::Event, String> {
-    let keys = state.signing_keys()?;
     nostr::EventBuilder::new(event.kind, event.content.clone())
         .tags(event.tags.iter().cloned())
         .allow_self_tagging()
-        .sign_with_keys(&keys)
+        .sign_with_keys(owner_keys)
         .map_err(|e| format!("failed to re-sign retained event: {e}"))
 }
 

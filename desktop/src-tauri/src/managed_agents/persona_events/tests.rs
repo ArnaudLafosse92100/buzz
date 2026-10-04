@@ -1014,10 +1014,8 @@ mod flush_barrier {
         .custom_created_at(nostr::Timestamp::from(1))
         .sign_with_keys(&keys)
         .unwrap();
-        let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
 
-        let fresh = resign_with_fresh_timestamp(&stale, &state).unwrap();
+        let fresh = resign_with_fresh_timestamp(&stale, &keys).unwrap();
 
         assert!(fresh.created_at.as_secs() > stale.created_at.as_secs());
         assert_eq!(fresh.kind, stale.kind);
@@ -1107,6 +1105,24 @@ mod flush_barrier {
         archive_status: axum::http::StatusCode,
         reason: &'static str,
     ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_archive_stub_relay_with(move |_| {
+            (
+                archive_status,
+                serde_json::json!({ "error": reason }).to_string(),
+            )
+        })
+        .await
+    }
+
+    /// Stub relay that asserts every POST is a kind:9035, counts them, and
+    /// answers with `respond(event)`.
+    async fn spawn_archive_stub_relay_with(
+        respond: impl Fn(&serde_json::Value) -> (axum::http::StatusCode, String)
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use axum::{routing::post, Router};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1116,6 +1132,7 @@ mod flush_barrier {
             "/events",
             post(move |body: String| {
                 let counter = std::sync::Arc::clone(&counter);
+                let respond = respond.clone();
                 async move {
                     let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                     assert_eq!(
@@ -1123,13 +1140,7 @@ mod flush_barrier {
                         Some(u64::from(buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST)),
                     );
                     counter.fetch_add(1, Ordering::SeqCst);
-                    (
-                        archive_status,
-                        serde_json::json!({
-                            "error": reason
-                        })
-                        .to_string(),
-                    )
+                    respond(&event)
                 }
             }),
         );
@@ -1218,6 +1229,122 @@ mod flush_barrier {
             "a 400-rejected archive request must not stay pending"
         );
         assert_eq!(posts, 1, "the second sweep must not re-POST it");
+    }
+
+    /// Every relay rejection reason that a re-signed retry cannot change takes
+    /// the request out of the retry queue (one POST across two sweeps). Each
+    /// reason is checked separately so dropping any one of them from the
+    /// permanent list fails here.
+    #[tokio::test]
+    async fn live_profile_no_longer_attesting_leaves_retry_queue() {
+        assert_permanently_rejected("invalid: live kind:0 no longer attests to request signer")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_profile_without_auth_tag_leaves_retry_queue() {
+        assert_permanently_rejected("invalid: missing auth tag").await;
+    }
+
+    #[tokio::test]
+    async fn live_profile_with_invalid_auth_tag_leaves_retry_queue() {
+        assert_permanently_rejected(
+            "invalid: invalid live kind:0 auth tag: signature verification failed: bad sig",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn request_auth_owner_mismatch_leaves_retry_queue() {
+        assert_permanently_rejected("invalid: request auth owner must equal request signer").await;
+    }
+
+    async fn assert_permanently_rejected(reason: &'static str) {
+        let (pending, posts) =
+            sweep_archive_twice(axum::http::StatusCode::BAD_REQUEST, reason).await;
+        assert!(
+            !pending,
+            "'{reason}' must take the request out of the queue"
+        );
+        assert_eq!(posts, 1, "'{reason}' must not be re-POSTed");
+    }
+
+    /// The flush re-signs a retained archive request with the scope's owner
+    /// keys, not whatever identity `AppState` holds when the POST happens. A
+    /// mismatch would make the relay reject the request as signed by someone
+    /// other than its auth-tag owner, which is classified as permanent, so an
+    /// identity change mid-flush would otherwise drop a valid request.
+    #[tokio::test]
+    async fn archive_request_is_resigned_with_scope_owner_keys() {
+        use axum::http::StatusCode;
+
+        let owner_keys = nostr::Keys::generate();
+        let owner = owner_keys.public_key().to_hex();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("retention.db");
+        let archive =
+            crate::events::build_archive_identity_request(&agent, "", Some("retired"), None, None)
+                .expect("build archive request")
+                .sign_with_keys(&owner_keys)
+                .expect("sign archive request");
+        retain_event(
+            &open_retention_db(&db_path).expect("open db"),
+            &RetainedEvent {
+                kind: buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST,
+                pubkey: owner.clone(),
+                d_tag: agent.clone(),
+                content: archive.content.to_string(),
+                created_at: archive.created_at.as_secs() as i64,
+                raw_event: archive.as_json(),
+                pending_sync: true,
+            },
+        )
+        .expect("retain archive request");
+
+        // Mirrors the relay's owner-consent check: only the auth-tag owner
+        // (here, the scope owner) may sign the request.
+        let expected_signer = owner.clone();
+        let (relay, _) = spawn_archive_stub_relay_with(move |event| {
+            if event.get("pubkey").and_then(serde_json::Value::as_str)
+                != Some(expected_signer.as_str())
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "error": "invalid: request auth owner must equal request signer"
+                    })
+                    .to_string(),
+                );
+            }
+            let id = event.get("id").and_then(serde_json::Value::as_str);
+            (
+                StatusCode::OK,
+                serde_json::json!({ "event_id": id, "accepted": true, "message": "" }).to_string(),
+            )
+        })
+        .await;
+
+        // The active identity changed after the scope was snapshotted.
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = nostr::Keys::generate();
+        *state.relay_url_override.lock().unwrap() = Some(relay);
+        let relay_url = crate::relay::relay_ws_url_with_override(&state);
+
+        let flushed = flush_pending_events_at(&db_path, &state, &relay_url, &owner_keys)
+            .await
+            .expect("flush");
+
+        assert_eq!(flushed, 1, "the request is published under the scope owner");
+        let row = get_retained_event(
+            &open_retention_db(&db_path).expect("reopen db"),
+            buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST,
+            &owner,
+            &agent,
+        )
+        .unwrap()
+        .expect("row kept");
+        assert!(!row.pending_sync, "an accepted request is synced");
     }
 
     /// A transient relay failure keeps the archive request pending so the
