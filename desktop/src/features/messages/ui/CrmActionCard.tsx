@@ -109,6 +109,7 @@ export function CrmActionCard({
       reaction.reactedByCurrentUser &&
       isFinalDecisionReaction(action, reaction.emoji),
   );
+  const expiredStatusId = `crm-reddit-expired-${React.useId()}`;
   const disabled = !canToggle || pending || expired || decided;
   const redditDraft =
     action.actionType === "reddit_mark_posted"
@@ -538,6 +539,16 @@ export function CrmActionCard({
   return (
     <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
       <p className="text-sm font-medium">Mark Reddit draft as posted</p>
+      {expired && !decided ? (
+        <p
+          className="mt-1 text-sm text-muted-foreground"
+          data-testid="crm-reddit-expired"
+          id={expiredStatusId}
+          role="status"
+        >
+          This review expired — nothing was marked as posted.
+        </p>
+      ) : null}
       <div className="mt-3 flex gap-2">
         {redditDraft ? (
           <Button
@@ -552,6 +563,7 @@ export function CrmActionCard({
           </Button>
         ) : null}
         <Button
+          aria-describedby={expired && !decided ? expiredStatusId : undefined}
           disabled={disabled}
           onClick={() => void onSelect(APPROVE_EMOJI)}
           size="sm"
@@ -561,6 +573,7 @@ export function CrmActionCard({
           Approve
         </Button>
         <Button
+          aria-describedby={expired && !decided ? expiredStatusId : undefined}
           disabled={disabled}
           onClick={() => void onSelect(CANCEL_EMOJI)}
           size="sm"
